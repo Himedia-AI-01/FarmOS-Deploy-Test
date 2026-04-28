@@ -29,7 +29,8 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ secrets.GHCR_OWNER }}/farmos-api
+  # IMAGE_NAME 은 build-and-push 잡의 Compute step 에서 lowercase 변환 후 출력으로 노출.
+  # GHCR(및 Docker Registry 표준) 은 repository name 이 [a-z0-9._-] 만 허용 — 대문자 owner 시 invalid tag.
   AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
@@ -42,15 +43,22 @@ jobs:
     timeout-minutes: 20
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
+      image_repo: ${{ steps.meta.outputs.image_repo }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compute tag
+      - name: Compute image metadata (lowercase repo + sha tag)
         id: meta
         run: |
+          # GHCR repository name 은 반드시 lowercase. GHCR_OWNER 가 'Himedia-AI-01' 같은
+          # 대소문자 혼합이어도 여기서 소문자로 정규화.
+          OWNER_LC=$(echo "${{ secrets.GHCR_OWNER }}" | tr '[:upper:]' '[:lower:]')
+          REPO="${OWNER_LC}/farmos-api"
           TAG="sha-${GITHUB_SHA::12}"
-          echo "image_tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Image tag: $TAG"
+          echo "image_repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$TAG"  >> "$GITHUB_OUTPUT"
+          echo "Repo: ${{ env.REGISTRY }}/${REPO}"
+          echo "Tag:  ${TAG}"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -68,8 +76,8 @@ jobs:
           file: backend/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.image_tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:${{ steps.meta.outputs.image_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
