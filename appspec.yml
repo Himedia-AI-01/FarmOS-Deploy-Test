@@ -1,0 +1,41 @@
+# Design Ref: §16.6 — farmos-ec2-deploy Module 4-B (v0.4)
+# Plan SC: SC-2 (/health 200), SC-9 (SSM→.env), R10/R11/R13 완화
+#
+# CodeDeploy lifecycle (EC2/On-premises, In-place).
+# 본 파일은 배포 번들 zip 의 root 에 위치해야 CodeDeploy agent 가 인식한다.
+# 훅별 timeout 단위는 초 (최대 3600).
+
+version: 0.0
+os: linux
+
+files:
+  - source: /
+    destination: /opt/farmos/release
+
+file_exists_behavior: OVERWRITE
+
+hooks:
+  ApplicationStop:
+    - location: scripts/application-stop.sh
+      timeout: 120
+      runas: ubuntu
+
+  BeforeInstall:
+    - location: scripts/before-install.sh
+      timeout: 60
+      runas: ubuntu
+
+  AfterInstall:
+    - location: scripts/after-install.sh
+      timeout: 120
+      runas: ubuntu
+
+  ApplicationStart:
+    - location: scripts/application-start.sh
+      timeout: 180
+      runas: ubuntu
+
+  ValidateService:
+    - location: scripts/validate-service.sh
+      timeout: 90
+      runas: ubuntu

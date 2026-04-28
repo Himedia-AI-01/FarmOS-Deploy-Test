@@ -1,0 +1,193 @@
+# Design Ref: §11.3 Module 3 — farmos-ec2-deploy CI (v0.3)
+# Plan SC: SC-5 (PR CI ≤ 8분 그린, 실패 시 머지 차단)
+# Plan R13 완화: compose-validate 잡으로 변수명 불일치 사전 차단
+# Plan R14 완화: gitleaks 잡으로 시크릿 평문 노출 0건
+#
+# 트리거 정책 (D4 + D10: dev=trunk):
+#   - PR (any → dev) / push to feature branch : 본 워크플로우 (lint + build + compose 검증 + secret scan)
+#   - push to dev (= trunk = prod 트리거)     : .github/workflows/deploy.yml (M4-C에서 작성)
+#
+# 본 리포지토리는 단일 브랜치(dev) 정책 — main 브랜치는 존재하지 않음.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [dev]
+
+# 동일 브랜치에서 새 push가 오면 진행 중인 CI 취소 (시간/비용 절약)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # ───────────────────────────────────────────────────────────────
+  # Backend Lint — ruff check + format check
+  # tests/ 디렉터리 부재 → pytest 잡은 향후 PDCA에서 도입
+  # ───────────────────────────────────────────────────────────────
+  backend-lint:
+    name: Backend Lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Set up Python (uv-managed)
+        run: uv python install 3.12
+
+      - name: Install dependencies (frozen)
+        run: uv sync --frozen --no-install-project
+
+      - name: Ruff lint check
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+  # ───────────────────────────────────────────────────────────────
+  # Frontend Lint + Build (build가 tsc -b 포함하므로 typecheck 자동)
+  # ───────────────────────────────────────────────────────────────
+  frontend-lint-build:
+    name: Frontend Lint + Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (clean)
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Build (tsc -b && vite build)
+        run: npm run build
+
+      - name: Upload build artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  # ───────────────────────────────────────────────────────────────
+  # docker-compose 문법 + 이미지 태그 + env 정합성 검증 (R13 사전 차단)
+  # .env.tmpl 의 ${SSM:...} 표기는 compose에서 그대로 평문 처리되어
+  # 검증 의미가 없으므로, .ci.env 라는 더미 파일을 즉석에서 생성해 사용.
+  # ───────────────────────────────────────────────────────────────
+  compose-validate:
+    name: Compose Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate dummy .ci.env (variable presence check only)
+        run: |
+          # 본 잡의 목적: 변수명 정합성 + compose 문법 검증.
+          # 실 시크릿은 절대 사용하지 않음 — 모든 값은 placeholder.
+          cat > .ci.env <<'EOF'
+          # Auto-generated for CI compose-validate only — never used in prod
+          POSTGRES_USER=farmos
+          POSTGRES_PASSWORD=ci-dummy
+          POSTGRES_DB=farmos
+          DATABASE_URL=postgresql+asyncpg://farmos:ci-dummy@postgres:5432/farmos
+          JWT_SECRET_KEY=ci-dummy-jwt
+          CORS_ORIGINS=["http://localhost:5173"]
+          LITELLM_URL=https://litellm.example.com/v1
+          LITELLM_API_KEY=ci-dummy
+          LITELLM_MODEL=ci-model
+          UPSTAGE_API_KEY=ci-dummy
+          GROQ_API_KEY=ci-dummy
+          GROQ_STT_URL=https://api.groq.example/v1/audio/transcriptions
+          GROQ_STT_MODEL=whisper-large-v3
+          IOT_RELAY_BASE_URL=http://localhost:9000
+          IOT_RELAY_API_KEY=ci-dummy
+          AI_AGENT_BRIDGE_ENABLED=false
+          KMA_DECODING_KEY=ci-dummy
+          NCPMS_API_KEY=ci-dummy
+          PESTICIDE_API_KEY=ci-dummy
+          FOOD_SAFETY_API_KEY=ci-dummy
+          KAMIS_API_KEY=ci-dummy
+          KAMIS_CERT_ID=ci-dummy
+          KAKAO_REST_API_KEY=ci-dummy
+          IMAGE_TAG=ci-dummy
+          GHCR_OWNER=ci-dummy
+          EOF
+
+      - name: Validate docker-compose.yml syntax
+        run: docker compose --env-file .ci.env config > /dev/null
+
+      - name: Verify required env keys are referenced (R13 sanity)
+        run: |
+          # config.py가 요구하는 핵심 6개 변수가 compose의 결과 환경에 노출되는지 확인.
+          # 누락 시 컨테이너 부팅 후 LLM/DB 호출 실패가 런타임에 발생하므로 PR 단계에서 차단.
+          MISSING=0
+          for KEY in DATABASE_URL JWT_SECRET_KEY LITELLM_URL LITELLM_API_KEY UPSTAGE_API_KEY IOT_RELAY_BASE_URL; do
+            if ! docker compose --env-file .ci.env config | grep -qE "^\s+${KEY}:"; then
+              echo "::error::missing key in compose env: ${KEY}"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            exit 1
+          fi
+          echo "✓ all 6 critical env keys are wired"
+
+      - name: Validate nginx.conf syntax
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" \
+            nginx:1.27-alpine nginx -t
+
+      - name: Guard against HTTPS redirect loop (R12 — CF Flexible)
+        run: |
+          # nginx.conf 에 "return 301 https://" 가 있으면 CloudFlare Flexible 모드에서
+          # 무한 리다이렉트가 발생하므로 절대 금지. v0.3 헤더 주석에도 명시.
+          if grep -nE "return\s+30[18]\s+https://" nginx/nginx.conf; then
+            echo "::error::nginx contains HTTPS redirect — CloudFlare Flexible 무한 루프 위험 (R12). 제거 필요."
+            exit 1
+          fi
+          echo "✓ no forced HTTPS redirect found"
+
+  # ───────────────────────────────────────────────────────────────
+  # Secret scan — gitleaks (R14 이행, 평문 노출 0건)
+  # ───────────────────────────────────────────────────────────────
+  gitleaks:
+    name: Gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history scan
+
+      - name: Gitleaks scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}  # 조직 멤버 >25 인 경우만 필요

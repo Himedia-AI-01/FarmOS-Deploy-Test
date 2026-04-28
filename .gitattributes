@@ -1,3 +1,14 @@
 *      text=auto
 *.bat  text eol=crlf
 *.cmd  text eol=crlf
+
+# Shell scripts and CI/CD configs MUST use LF line endings (executed on Linux EC2 / GH Actions runners).
+# Windows checkout 시 CRLF로 변환되면 /usr/bin/env\r 에러로 실행 실패.
+*.sh         text eol=lf
+appspec.yml  text eol=lf
+Dockerfile   text eol=lf
+.dockerignore text eol=lf
+nginx/*.conf text eol=lf
+docker-compose.yml text eol=lf
+.env.tmpl    text eol=lf
+.github/workflows/*.yml text eol=lf

@@ -1,0 +1,234 @@
+# Design Ref: §16.13 — farmos-ec2-deploy Module 4-C (v0.4)
+# Plan SC: SC-1 (dev push → 5분 내 prod), SC-8 (OIDC AssumeRole), FR-12 (CodeDeploy 라이프사이클)
+# R9 완화: Verify OIDC AssumeRole step
+# R10 완화: S3 head-bucket / CodeDeploy get-application 사전 검증
+# D10: dev = trunk = prod 트리거 (main 브랜치 부재)
+#
+# 흐름:
+#   build-and-push  ─┐
+#                    ├─→ deploy (OIDC → SSM image/tag → S3 → CodeDeploy → wait)
+#   build-frontend  ─┘
+
+name: Deploy (prod)
+
+on:
+  push:
+    branches: [ dev ]
+  workflow_dispatch:
+
+# 동시 배포 차단 (직전 배포 완료 후 다음 배포). cancel-in-progress: false 로
+# 진행 중 배포가 새 푸시로 잘려나가지 않도록 보호.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  id-token: write       # OIDC AssumeRole (필수)
+  contents: read
+  packages: write       # GHCR push
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ secrets.GHCR_OWNER }}/farmos-api
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # Job 1: Backend Docker 이미지 빌드 + GHCR push
+  # ────────────────────────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push to GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute tag
+        id: meta
+        run: |
+          TAG="sha-${GITHUB_SHA::12}"
+          echo "image_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Image tag: $TAG"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push (backend)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.image_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ────────────────────────────────────────────────────────────────
+  # Job 2: Frontend 빌드 (Vite) — 병렬 실행
+  # ────────────────────────────────────────────────────────────────
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (clean)
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build (tsc -b && vite build)
+        run: npm run build
+        working-directory: frontend
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────
+  # Job 3: CodeDeploy 트리거 (OIDC → S3 → create-deployment → wait)
+  # ────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy via CodeDeploy
+    needs: [ build-and-push, build-frontend ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25     # CodeDeploy In-Place 평균 5~10분, 여유 15분
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-actions-${{ github.run_id }}
+          role-duration-seconds: 3600
+
+      # R9 완화: OIDC AssumeRole 동작 검증
+      - name: Verify OIDC AssumeRole
+        run: |
+          aws sts get-caller-identity
+          echo "✓ OIDC AssumeRole succeeded"
+
+      # R10 완화 (보강): S3 + CodeDeploy 권한 사전 검증 — 번들 빌드 전 차단
+      - name: Pre-flight check (S3 + CodeDeploy permissions)
+        run: |
+          echo "→ S3 bucket head check..."
+          aws s3api head-bucket --bucket "${{ secrets.S3_DEPLOY_BUCKET }}" \
+            --region "${{ env.AWS_REGION }}"
+          echo "✓ S3 bucket accessible"
+
+          echo "→ CodeDeploy application check..."
+          aws deploy get-application \
+            --application-name "${{ secrets.CODEDEPLOY_APP }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'application.applicationName' --output text
+          echo "✓ CodeDeploy application accessible"
+
+          echo "→ CodeDeploy deployment group check..."
+          aws deploy get-deployment-group \
+            --application-name "${{ secrets.CODEDEPLOY_APP }}" \
+            --deployment-group-name "${{ secrets.CODEDEPLOY_GROUP }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'deploymentGroupInfo.{name:deploymentGroupName,autoRollback:autoRollbackConfiguration.enabled}'
+          echo "✓ CodeDeploy deployment group accessible"
+
+      # IMAGE_TAG를 SSM에 PutParameter — AfterInstall 훅이 .env 생성 시 이 값을 읽음
+      - name: Update IMAGE_TAG in Parameter Store
+        run: |
+          aws ssm put-parameter \
+            --name /farmos/prod/image/tag \
+            --type String \
+            --value "${{ needs.build-and-push.outputs.image_tag }}" \
+            --overwrite \
+            --region ${{ env.AWS_REGION }}
+          echo "✓ /farmos/prod/image/tag = ${{ needs.build-and-push.outputs.image_tag }}"
+
+      # 배포 번들 zip 구성:
+      #   bundle/
+      #   ├── appspec.yml
+      #   ├── docker-compose.yml
+      #   ├── nginx.conf            ← nginx/nginx.conf → bundle/nginx.conf 평탄화
+      #   ├── scripts/*.sh
+      #   └── dist/                 ← frontend 빌드 산출물
+      - name: Build CodeDeploy bundle
+        run: |
+          mkdir -p bundle/scripts
+          cp appspec.yml             bundle/
+          cp docker-compose.yml      bundle/
+          cp nginx/nginx.conf        bundle/nginx.conf
+          cp scripts/application-stop.sh   bundle/scripts/
+          cp scripts/before-install.sh     bundle/scripts/
+          cp scripts/after-install.sh      bundle/scripts/
+          cp scripts/application-start.sh  bundle/scripts/
+          cp scripts/validate-service.sh   bundle/scripts/
+          chmod +x bundle/scripts/*.sh
+          cp -r dist bundle/dist
+          cd bundle && zip -rq ../deploy-bundle.zip . && cd ..
+          ls -lh deploy-bundle.zip
+          unzip -l deploy-bundle.zip | head -20
+
+      - name: Upload bundle to S3
+        id: s3upload
+        run: |
+          BUNDLE_KEY="bundles/${{ needs.build-and-push.outputs.image_tag }}.zip"
+          aws s3 cp deploy-bundle.zip "s3://${{ secrets.S3_DEPLOY_BUCKET }}/${BUNDLE_KEY}" \
+            --region ${{ env.AWS_REGION }}
+          echo "bundle_key=${BUNDLE_KEY}" >> "$GITHUB_OUTPUT"
+          echo "✓ Uploaded: s3://${{ secrets.S3_DEPLOY_BUCKET }}/${BUNDLE_KEY}"
+
+      - name: Trigger CodeDeploy
+        id: deploy
+        run: |
+          DEPLOY_ID=$(aws deploy create-deployment \
+            --application-name "${{ secrets.CODEDEPLOY_APP }}" \
+            --deployment-group-name "${{ secrets.CODEDEPLOY_GROUP }}" \
+            --deployment-config-name CodeDeployDefault.AllAtOnce \
+            --description "git ${{ github.sha }} by ${{ github.actor }} (run ${{ github.run_id }})" \
+            --revision "{\"revisionType\":\"S3\",\"s3Location\":{\"bucket\":\"${{ secrets.S3_DEPLOY_BUCKET }}\",\"key\":\"${{ steps.s3upload.outputs.bundle_key }}\",\"bundleType\":\"zip\"}}" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'deploymentId' --output text)
+          echo "deployment_id=$DEPLOY_ID" >> "$GITHUB_OUTPUT"
+          echo "Deployment ID: $DEPLOY_ID"
+          echo "Console URL: https://${{ env.AWS_REGION }}.console.aws.amazon.com/codedeploy/home?region=${{ env.AWS_REGION }}#/deployments/${DEPLOY_ID}"
+
+      - name: Wait for deployment to complete
+        run: |
+          echo "Waiting for deployment ${{ steps.deploy.outputs.deployment_id }}..."
+          aws deploy wait deployment-successful \
+            --deployment-id ${{ steps.deploy.outputs.deployment_id }} \
+            --region ${{ env.AWS_REGION }}
+          echo "✓ Deployment Succeeded"
+
+      - name: Show deployment summary
+        if: always()
+        run: |
+          aws deploy get-deployment \
+            --deployment-id ${{ steps.deploy.outputs.deployment_id }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'deploymentInfo.{Status:status,Created:createTime,Complete:completeTime,ErrorInformation:errorInformation,Rollback:rollbackInfo}'

@@ -1,0 +1,105 @@
+# Design Ref: §16.4 — farmos-ec2-deploy Module 2 (v0.3)
+# Plan SC: SC-3 (Postgres 데이터 보존), 다운타임 ≤ 10초 (depends_on healthcheck 체인)
+#
+# v0.3 정합 원칙 (D9):
+#   - backend/.env.example 변수명을 SoT로 사용 (DATABASE_URL/JWT_SECRET_KEY/UPSTAGE_API_KEY 등)
+#   - api 서비스는 env_file: ./.env 만 사용 — environment 블록의 잘못된 변수 매핑 제거
+#   - LiteLLM 단일 출구 (D9-B) → OPENAI_API_KEY 항목 없음
+#   - postgres POSTGRES_PASSWORD 는 /opt/farmos/.env 의 동명 변수에서 자동 주입
+#
+# 배치 위치: /opt/farmos/docker-compose.yml (CodeDeploy Install 단계가 release/ → /opt/farmos/ 복사)
+# .env: AfterInstall 훅이 Parameter Store /farmos/prod/* 28개에서 자동 생성 (perm 600).
+# .env는 git에 커밋되지 않음 (D8).
+#
+# Usage (운영자 수동 시):
+#   cd /opt/farmos
+#   export IMAGE_TAG=sha-abc123
+#   docker compose pull && docker compose up -d
+#
+# Usage (CodeDeploy 자동):
+#   ApplicationStart 훅 (scripts/application-start.sh)이 호출.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: farmos-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-farmos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}      # /opt/farmos/.env (SSM /farmos/prod/db/password)
+      POSTGRES_DB:       ${POSTGRES_DB:-farmos}
+      TZ: Asia/Seoul
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data   # 호스트 바인드 마운트 — SC-3 데이터 보존
+    networks:
+      - farmos
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-farmos} -d ${POSTGRES_DB:-farmos}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  api:
+    image: ghcr.io/${GHCR_OWNER}/farmos-api:${IMAGE_TAG:-latest}
+    container_name: farmos-api
+    restart: unless-stopped
+    # ────────────────────────────────────────────────────────────────
+    # v0.3: 단일 env_file. backend/app/core/config.py 가 요구하는 모든
+    # 변수(DATABASE_URL/JWT_SECRET_KEY/CORS_ORIGINS/LITELLM_*/UPSTAGE_API_KEY/
+    #  GROQ_*/IOT_RELAY_*/외부 API 키)는 .env 단일 파일에 평문 주입된다.
+    # AfterInstall 훅이 SSM /farmos/prod/* 28키를 jq로 평탄화 → .env 생성.
+    # ────────────────────────────────────────────────────────────────
+    env_file:
+      - ./.env                                     # AfterInstall 훅이 Parameter Store에서 생성 (D8)
+    environment:
+      # config.py 가 default를 갖지만 컨테이너 내부 절대 경로로 강제하는 항목만 명시
+      CHROMA_DB_PATH: /app/chroma_data
+      TZ: Asia/Seoul
+    volumes:
+      - ./data/chroma:/app/chroma_data             # ChromaDB 인덱스 영속화 (FR-08)
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - farmos
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s                            # ML 모델 로드 + DB ping 대기
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: farmos-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # 443 미사용 — CloudFlare Flexible SSL이 TLS 종료 (D6)
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro      # CodeDeploy가 release/nginx.conf → /opt/farmos/nginx.conf 로 복사
+      - ./dist:/usr/share/nginx/html:ro            # 프론트엔드 빌드 산출물 (M3 CI에서 빌드 → 번들에 포함)
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - farmos
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  farmos:
+    driver: bridge
