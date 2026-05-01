@@ -67,7 +67,9 @@ services:
     networks:
       - farmos
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      # FastAPI 의 health endpoint 는 API_V1_PREFIX(/api/v1) 하위에 마운트됨.
+      # main.py: app.include_router(health.router, prefix=settings.API_V1_PREFIX)
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
       interval: 15s
       timeout: 5s
       retries: 5
