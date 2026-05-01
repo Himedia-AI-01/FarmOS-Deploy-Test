@@ -56,3 +56,4 @@ backend/benchmark_stt.py
 # ========== 로컬 실행 스크립트 ==========
 start.cmd
 /settings.json
+ *.pem
