@@ -143,6 +143,27 @@ jobs:
           aws sts get-caller-identity
           echo "✓ OIDC AssumeRole succeeded"
 
+      # ──── 임시 디버그 (트러블슈팅 후 제거) ────
+      # Secret 값의 길이/형식 진단 — 값 자체는 노출 안 됨
+      - name: DEBUG — secret sanity check
+        run: |
+          BUCKET="${{ secrets.S3_DEPLOY_BUCKET }}"
+          REGION="${{ env.AWS_REGION }}"
+          APP="${{ secrets.CODEDEPLOY_APP }}"
+          DG="${{ secrets.CODEDEPLOY_GROUP }}"
+          echo "Bucket length: ${#BUCKET}     (expected: 35 = farmos-deploy-bundles-242201280878)"
+          echo "Bucket md5:    $(printf '%s' "$BUCKET" | md5sum | cut -d' ' -f1)"
+          echo "Region:        '$REGION'      (expected: 'ap-northeast-2')"
+          echo "Region length: ${#REGION}     (expected: 14)"
+          echo "App length:    ${#APP}        (expected: 11 = farmos-prod)"
+          echo "DG length:     ${#DG}         (expected: 14 = farmos-prod-dg)"
+          echo "---"
+          echo "Direct s3 ls (no head-bucket):"
+          aws s3 ls "s3://$BUCKET/" --region "$REGION" 2>&1 | head -5 || echo "  (empty bucket or access denied)"
+          echo "---"
+          echo "Cross-region ls (no --region flag):"
+          aws s3api list-objects-v2 --bucket "$BUCKET" --max-items 1 2>&1 | head -10 || true
+
       # R10 완화 (보강): S3 + CodeDeploy 권한 사전 검증 — 번들 빌드 전 차단
       - name: Pre-flight check (S3 + CodeDeploy permissions)
         run: |
