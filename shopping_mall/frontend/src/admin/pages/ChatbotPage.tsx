@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import { useChatSessions, useSessionLogs } from '@/admin/hooks/useChatbot';
 import { useUserExchangeTickets } from '@/admin/hooks/useTickets';
 import { INTENT_LABEL, INTENT_COLOR_BADGE as INTENT_COLOR } from '@/admin/constants/chatbot';
-import { TICKET_STATUS_LABEL, TICKET_ACTION_LABEL, TICKET_ACTION_COLOR } from '@/admin/types/ticket';
+import { TICKET_STATUS_LABEL, TICKET_STATUS_COLOR, TICKET_ACTION_LABEL, TICKET_ACTION_COLOR } from '@/admin/types/ticket';
 import { formatDate } from '@/lib/utils';
 import type { ChatSession } from '@/admin/types/chatlog';
 import type { Ticket } from '@/admin/types/ticket';
@@ -16,61 +16,73 @@ import type { Ticket } from '@/admin/types/ticket';
 function RelatedTickets({ tickets, isLoading }: { tickets: Ticket[]; isLoading: boolean }) {
   if (isLoading) {
     return (
-      <p className="text-xs text-stone-400 py-2">관련 티켓 조회 중...</p>
+      <div className="space-y-2.5">
+        {Array.from({ length: 2 }).map((_, i) => (
+          <div key={i} className="p-3 rounded-xl bg-stone-50 border border-stone-100 animate-pulse space-y-2">
+            <div className="flex justify-between">
+              <div className="h-4 w-12 bg-stone-200 rounded-full" />
+              <div className="h-3 w-8 bg-stone-100 rounded" />
+            </div>
+            <div className="h-3 w-full bg-stone-100 rounded" />
+            <div className="flex justify-between">
+              <div className="h-4 w-10 bg-stone-100 rounded-full" />
+              <div className="h-4 w-14 bg-stone-100 rounded" />
+            </div>
+          </div>
+        ))}
+      </div>
     );
   }
 
   if (tickets.length === 0) {
     return (
-      <p className="text-xs text-stone-400 py-2">교환 티켓 없음</p>
+      <div className="py-6 flex flex-col items-center gap-2 text-center">
+        <span className="material-symbols-outlined text-stone-200 text-[32px]" aria-hidden="true">
+          inventory_2
+        </span>
+        <p className="text-xs text-stone-400">연관된 티켓이 없습니다.</p>
+      </div>
     );
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2.5">
       {tickets.map((ticket) => {
-        const isCompleted = ticket.status === 'completed' || ticket.status === 'cancelled';
+        const isDone = ticket.status === 'completed' || ticket.status === 'cancelled';
         return (
           <div
             key={ticket.id}
-            className={`p-4 rounded-xl border-l-4 ${
-              isCompleted
-                ? 'bg-stone-50 border-l-stone-300'
-                : 'bg-surface-container-low border-l-emerald-500'
+            className={`rounded-xl border overflow-hidden ${
+              isDone ? 'border-stone-200' : 'border-emerald-200'
             }`}
           >
-            <div className="flex justify-between items-start mb-2">
-              <span
-                className={`text-[10px] font-black px-2 py-0.5 rounded uppercase ${TICKET_ACTION_COLOR[ticket.action_type]}`}
-              >
+            {/* Card header */}
+            <div className={`flex items-center justify-between px-3 py-2 ${isDone ? 'bg-stone-50' : 'bg-emerald-50'}`}>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${TICKET_ACTION_COLOR[ticket.action_type]} ${
+                ticket.action_type === 'exchange' ? 'border-purple-200' : 'border-red-200'
+              }`}>
                 {TICKET_ACTION_LABEL[ticket.action_type]}
               </span>
-              <span className="text-[10px] text-stone-500 font-medium">
-                #{ticket.id}
-              </span>
+              <span className="text-[10px] text-stone-400 font-medium">티켓 #{ticket.id}</span>
             </div>
-            <p className="text-xs font-bold text-on-surface mb-2 truncate">
-              {ticket.reason}
-            </p>
-            <div className="flex items-center justify-between">
-              <span
-                className={`text-[10px] font-bold flex items-center gap-1 ${
-                  isCompleted ? 'text-stone-500' : 'text-emerald-700'
-                }`}
-              >
-                <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    isCompleted ? 'bg-stone-400' : 'bg-emerald-500'
-                  }`}
-                />
-                {TICKET_STATUS_LABEL[ticket.status]}
-              </span>
-              <NavLink
-                to={`/admin/tickets?ticketId=${ticket.id}`}
-                className="text-[10px] font-bold text-primary hover:underline"
-              >
-                상세보기
-              </NavLink>
+
+            {/* Card body */}
+            <div className="px-3 py-2.5 bg-white">
+              <p className="text-xs text-stone-700 line-clamp-2 leading-relaxed mb-2.5">
+                {ticket.reason}
+              </p>
+              <div className="flex items-center justify-between">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${TICKET_STATUS_COLOR[ticket.status]}`}>
+                  {TICKET_STATUS_LABEL[ticket.status]}
+                </span>
+                <NavLink
+                  to={`/admin/tickets?ticketId=${ticket.id}`}
+                  className="flex items-center gap-0.5 text-[11px] font-bold text-emerald-700 hover:text-emerald-900 transition-colors"
+                >
+                  상세보기
+                  <span className="material-symbols-outlined text-[13px]" aria-hidden="true">arrow_forward</span>
+                </NavLink>
+              </div>
             </div>
           </div>
         );
@@ -111,91 +123,113 @@ export default function ChatbotPage() {
       {/* ────── Left Panel: Session List ────── */}
       <aside className="w-[288px] shrink-0 border-r border-zinc-100 flex flex-col bg-surface">
 
-        {/* Tab switcher */}
-        <div className="p-4 border-b border-zinc-100">
-          <div className="flex gap-2 p-1 bg-surface-container rounded-xl">
+        {/* Header + Tab switcher */}
+        <div className="p-4 pb-3 border-b border-zinc-100 space-y-3">
+          <h2 className="text-base font-bold text-on-surface">챗봇 대화 모니터링</h2>
+          <div className="grid grid-cols-2 gap-1 p-1 bg-surface-container rounded-xl">
             <button
               type="button"
               onClick={() => { setTab('all'); setSelectedSession(null); }}
-              className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+              className={`flex flex-col items-center py-2 text-xs font-semibold rounded-lg transition-colors ${
                 tab === 'all'
                   ? 'bg-white shadow-sm text-on-surface'
                   : 'text-stone-500 hover:bg-white/50'
               }`}
               aria-pressed={tab === 'all'}
             >
-              전체 대화
+              <span>전체 대화</span>
+              <span className={`text-[10px] font-bold leading-tight mt-0.5 ${tab === 'all' ? 'text-stone-400' : 'text-stone-300'}`}>
+                {allSessions.length}
+              </span>
             </button>
             <button
               type="button"
               onClick={() => { setTab('escalated'); setSelectedSession(null); }}
-              className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-1.5 ${
+              className={`flex flex-col items-center py-2 text-xs font-medium rounded-lg transition-colors ${
                 tab === 'escalated'
                   ? 'bg-white shadow-sm text-on-surface'
                   : 'text-stone-500 hover:bg-white/50'
               }`}
               aria-pressed={tab === 'escalated'}
             >
-              에스컬레이션
-              {escalatedSessions.length > 0 && (
-                <span className="bg-error text-white text-[10px] px-1.5 rounded-full leading-none py-0.5">
-                  {escalatedSessions.length}
-                </span>
-              )}
+              <span className="flex items-center gap-1">
+                에스컬레이션
+                {escalatedSessions.length > 0 && (
+                  <span className="bg-red-500 text-white text-[10px] px-1.5 rounded-full leading-none py-0.5 font-bold">
+                    {escalatedSessions.length}
+                  </span>
+                )}
+              </span>
+              <span className={`text-[10px] font-bold leading-tight mt-0.5 ${tab === 'escalated' ? 'text-stone-400' : 'text-stone-300'}`}>
+                {escalatedSessions.length}
+              </span>
             </button>
           </div>
         </div>
 
         {/* Session list */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
           {isLoading ? (
             Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="p-4 border-b border-stone-50 animate-pulse space-y-2" aria-hidden="true">
-                <div className="h-3 w-20 bg-stone-200 rounded" />
+              <div key={i} className="p-4 rounded-xl bg-white border border-stone-100 animate-pulse space-y-2" aria-hidden="true">
+                <div className="flex justify-between">
+                  <div className="h-3 w-20 bg-stone-200 rounded" />
+                  <div className="h-2 w-12 bg-stone-100 rounded" />
+                </div>
                 <div className="h-3 w-40 bg-stone-100 rounded" />
+                <div className="flex gap-2">
+                  <div className="h-4 w-14 bg-stone-100 rounded" />
+                  <div className="h-4 w-10 bg-stone-100 rounded" />
+                </div>
               </div>
             ))
           ) : sessions.length === 0 ? (
-            <div className="p-6 text-center text-stone-400 text-sm">대화 내역이 없습니다.</div>
+            <div className="py-12 text-center space-y-2">
+              <span className="material-symbols-outlined text-stone-200 text-[40px] block" aria-hidden="true">
+                chat_bubble
+              </span>
+              <p className="text-sm text-stone-400">대화 내역이 없습니다.</p>
+            </div>
           ) : (
             sessions.map((session) => {
               const preview = session.title
                 ?? (session.last_question ? session.last_question.slice(0, 40) : '내용 없음');
+              const isSelected = selectedSession?.id === session.id;
               return (
                 <button
                   key={session.id}
                   type="button"
                   onClick={() => setSelectedSession(session)}
-                  className={`w-full text-left p-4 transition-all ${
-                    selectedSession?.id === session.id
-                      ? 'bg-primary-container/5 border-b border-primary/10'
-                      : 'hover:bg-stone-100/50 border-b border-stone-50'
+                  className={`w-full text-left p-3.5 rounded-xl border transition-all ${
+                    isSelected
+                      ? 'bg-emerald-50 border-emerald-300 shadow-sm ring-1 ring-emerald-200/60'
+                      : 'bg-white border-stone-200 hover:border-emerald-200 hover:shadow-sm'
                   }`}
-                  aria-pressed={selectedSession?.id === session.id}
+                  aria-pressed={isSelected}
                 >
-                  {/* Row 1: user ID + dots + time */}
-                  <div className="flex justify-between items-start mb-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-bold text-on-surface">
+                  {/* Row 1: user ID + indicators + time */}
+                  <div className="flex justify-between items-center mb-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-sm font-bold ${isSelected ? 'text-emerald-800' : 'text-on-surface'}`}>
                         회원 #{session.user_id}
                       </span>
                       {session.has_escalation && (
                         <span
-                          className="w-1.5 h-1.5 rounded-full bg-error animate-pulse shrink-0"
+                          className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shrink-0"
                           title="에스컬레이션"
                           aria-label="에스컬레이션"
                         />
                       )}
                       {session.pending_ticket_status && (
                         <span
-                          className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase tracking-tight shrink-0 ${
+                          className={`text-[9px] font-black px-1.5 py-0.5 rounded-full shrink-0 ${
                             session.pending_ticket_status === 'received'
-                              ? 'bg-amber-100 text-amber-700'
-                              : 'bg-sky-100 text-sky-700'
+                              ? 'bg-amber-100 text-amber-700 border border-amber-200'
+                              : 'bg-sky-100 text-sky-700 border border-sky-200'
                           }`}
                           title={session.pending_ticket_status === 'received' ? '미접수 티켓 있음' : '처리 중인 티켓 있음'}
                         >
-                          Ticket
+                          티켓
                         </span>
                       )}
                     </div>
@@ -207,15 +241,19 @@ export default function ChatbotPage() {
                   </div>
 
                   {/* Row 2: title / question preview */}
-                  <p className="text-xs text-stone-600 line-clamp-1 mb-1">{preview}</p>
+                  <p className="text-xs text-stone-600 line-clamp-1 mb-1.5">{preview}</p>
 
                   {/* Row 3: message count badge + status */}
                   <div className="flex items-center gap-2">
-                    <span className="px-1.5 py-0.5 bg-stone-100 text-stone-500 text-[10px] font-bold rounded">
-                      {session.log_count}개 메시지
+                    <span className="px-2 py-0.5 bg-stone-100 text-stone-500 text-[10px] font-bold rounded-full">
+                      {session.log_count}개
                     </span>
-                    <span className="text-[10px] text-stone-400 font-medium">
-                      {session.status}
+                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                      session.status === 'active'
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-stone-100 text-stone-500'
+                    }`}>
+                      {session.status === 'active' ? '진행중' : '종료'}
                     </span>
                   </div>
                 </button>
@@ -252,49 +290,45 @@ export default function ChatbotPage() {
                 <div className="flex gap-2 shrink-0">
                   <button
                     type="button"
-                    className="bg-stone-100 text-stone-600 px-4 py-2 rounded-xl text-sm font-bold hover:bg-stone-200 transition-colors"
+                    className="flex items-center gap-1.5 bg-stone-100 text-stone-600 px-4 py-2 rounded-xl text-sm font-bold hover:bg-stone-200 transition-colors"
                   >
+                    <span className="material-symbols-outlined text-[16px]" aria-hidden="true">history</span>
                     이력 보기
-                  </button>
-                  <button
-                    type="button"
-                    className="bg-primary text-on-primary px-4 py-2 rounded-xl text-sm font-bold shadow-lg shadow-primary/20 hover:opacity-90 transition-opacity"
-                  >
-                    직접 상담 전환
                   </button>
                 </div>
               </div>
 
               {/* Escalation warning banner */}
               {selectedSession.has_escalation && (
-                <div className="flex items-center gap-3 p-3 bg-error-container/30 border border-error/10 rounded-xl">
-                  <span
-                    className="material-symbols-outlined text-error text-[20px]"
-                    aria-hidden="true"
-                  >
-                    report
+                <div className="mt-3 flex items-center gap-2 px-3 py-2 bg-rose-50 border border-rose-300 rounded-lg">
+                  <span className="material-symbols-outlined text-rose-400 text-[15px] shrink-0" style={{ fontVariationSettings: "'FILL' 1" }} aria-hidden="true">
+                    warning
                   </span>
-                  <p className="text-sm font-semibold text-on-error-container">
-                    해당 대화는 AI 처리 한계를 초과하여 에스컬레이션되었습니다. 상담원 개입이 권장됩니다.
-                  </p>
+                  <p className="text-xs font-medium text-rose-900 flex-1">상담원 개입 권장</p>
+                  <button
+                    type="button"
+                    className="shrink-0 px-2.5 py-1 border border-rose-300 text-rose-700 bg-white text-[11px] font-semibold rounded-md hover:bg-rose-500 hover:border-rose-500 hover:text-white transition-colors"
+                  >
+                    직접 상담 전환
+                  </button>
                 </div>
               )}
 
               {/* Pending ticket warning banner */}
               {pendingSelectedTickets.length > 0 && (
-                <div className="flex items-center gap-3 p-3 bg-amber-50 border border-amber-200 rounded-xl">
-                  <span
-                    className="material-symbols-outlined text-amber-500 text-[20px] shrink-0"
-                    aria-hidden="true"
-                  >
+                <div className="mt-2 flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-300 rounded-lg">
+                  <span className="material-symbols-outlined text-amber-400 text-[15px] shrink-0" style={{ fontVariationSettings: "'FILL' 1" }} aria-hidden="true">
                     assignment_late
                   </span>
-                  <p className="text-sm font-semibold text-amber-800">
-                    처리되지 않은 티켓이 {pendingSelectedTickets.length}건 있습니다.
+                  <p className="text-xs font-medium text-amber-900 flex-1">
+                    미처리 티켓
+                    <span className="ml-1 inline-flex items-center justify-center w-4 h-4 bg-amber-200 text-amber-800 text-[10px] font-black rounded-full">
+                      {pendingSelectedTickets.length}
+                    </span>
                   </p>
                   <NavLink
                     to={`/admin/tickets?userId=${selectedSession.user_id}`}
-                    className="ml-auto text-xs font-bold text-amber-700 hover:underline shrink-0"
+                    className="shrink-0 px-2.5 py-1 border border-amber-300 text-amber-700 bg-white text-[11px] font-semibold rounded-md hover:bg-amber-500 hover:border-amber-500 hover:text-white transition-colors"
                   >
                     티켓 보기
                   </NavLink>
@@ -460,20 +494,17 @@ export default function ChatbotPage() {
           </span>
         </button>
 
-        <div className={`flex-1 overflow-y-auto p-6 space-y-8 ${sidebarOpen ? '' : 'hidden'}`}>
+        <div className={`flex-1 overflow-y-auto ${sidebarOpen ? '' : 'hidden'}`}>
 
         {selectedSession ? (
           <>
             {/* Section 1: Related tickets */}
-            <div>
-              <h3 className="text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
-                <span
-                  className="material-symbols-outlined text-emerald-600 text-[20px]"
-                  aria-hidden="true"
-                >
+            <div className="px-5 py-4 border-b border-stone-100">
+              <h3 className="text-xs font-bold text-stone-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[14px] text-stone-400" aria-hidden="true">
                   inventory_2
                 </span>
-                연관 티켓 정보
+                연관 티켓
               </h3>
 
               {sessionLogs.some((l) => l.intent === 'exchange') ? (
@@ -482,73 +513,56 @@ export default function ChatbotPage() {
                   isLoading={loadingSelectedTickets}
                 />
               ) : (
-                <p className="text-xs text-stone-400 py-2">
-                  해당 인텐트에는 연관 티켓이 없습니다.
-                </p>
+                <div className="py-5 flex flex-col items-center gap-2 text-center">
+                  <span className="material-symbols-outlined text-stone-200 text-[28px]" aria-hidden="true">
+                    inventory_2
+                  </span>
+                  <p className="text-xs text-stone-400">교환 관련 대화가 없습니다.</p>
+                </div>
               )}
             </div>
 
             {/* Section 2: User summary */}
-            <div>
-              <h3 className="text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
-                <span
-                  className="material-symbols-outlined text-emerald-600 text-[20px]"
-                  aria-hidden="true"
-                >
-                  account_circle
+            <div className="px-5 py-4">
+              <h3 className="text-xs font-bold text-stone-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[14px] text-stone-400" aria-hidden="true">
+                  person
                 </span>
-                회원 요약 정보
+                회원 정보
               </h3>
 
-              <div className="space-y-4">
-                {/* Avatar + name */}
-                <div className="flex items-center gap-4">
-                  <div
-                    className="w-12 h-12 rounded-xl bg-secondary-container flex items-center justify-center text-on-secondary-container shrink-0"
-                    aria-hidden="true"
-                  >
-                    <span className="material-symbols-outlined text-2xl">person</span>
+              <div className="space-y-1">
+                {/* Row items */}
+                {[
+                  { label: '회원 ID', value: `#${selectedSession.user_id}` },
+                  { label: '메시지 수', value: `${selectedSession.log_count}개` },
+                  {
+                    label: '세션 상태',
+                    value: selectedSession.status === 'active' ? '진행중' : '종료',
+                    valueClass: selectedSession.status === 'active' ? 'text-emerald-600' : 'text-stone-400',
+                  },
+                  {
+                    label: '에스컬레이션',
+                    value: selectedSession.has_escalation ? '있음' : '없음',
+                    valueClass: selectedSession.has_escalation ? 'text-red-600' : 'text-stone-500',
+                  },
+                  { label: '세션 시작', value: formatDate(selectedSession.created_at, 'MM.dd HH:mm') },
+                ].map(({ label, value, valueClass }) => (
+                  <div key={label} className="flex items-center justify-between py-2 border-b border-stone-50 last:border-0">
+                    <span className="text-xs text-stone-400">{label}</span>
+                    <span className={`text-xs font-semibold ${valueClass ?? 'text-stone-700'}`}>{value}</span>
                   </div>
-                  <div>
-                    <p className="text-sm font-bold text-on-surface">
-                      회원 #{selectedSession.user_id}
-                    </p>
-                    <p className="text-xs text-stone-500">
-                      {formatDate(selectedSession.created_at, 'yyyy.MM.dd')} 세션 시작
-                    </p>
-                  </div>
-                </div>
-
-                {/* Stats grid */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="bg-stone-50 p-3 rounded-lg">
-                    <p className="text-[10px] text-stone-400 font-bold uppercase tracking-tighter mb-1">
-                      메시지 수
-                    </p>
-                    <p className="text-sm font-bold text-on-surface">
-                      {selectedSession.log_count}개
-                    </p>
-                  </div>
-                  <div className="bg-stone-50 p-3 rounded-lg">
-                    <p className="text-[10px] text-stone-400 font-bold uppercase tracking-tighter mb-1">
-                      에스컬레이션 여부
-                    </p>
-                    <p
-                      className={`text-sm font-bold ${
-                        selectedSession.has_escalation ? 'text-error' : 'text-emerald-700'
-                      }`}
-                    >
-                      {selectedSession.has_escalation ? '예' : '아니오'}
-                    </p>
-                  </div>
-                </div>
+                ))}
               </div>
             </div>
           </>
         ) : (
           /* Right sidebar empty state */
-          <div className="h-full flex items-center justify-center">
-            <p className="text-xs text-stone-300 text-center">
+          <div className="h-full flex flex-col items-center justify-center gap-2 p-6">
+            <span className="material-symbols-outlined text-stone-200 text-[36px]" aria-hidden="true" style={{ fontVariationSettings: "'FILL' 1" }}>
+              chat_bubble
+            </span>
+            <p className="text-xs text-stone-300 text-center leading-relaxed">
               대화를 선택하면<br />상세 정보가 표시됩니다.
             </p>
           </div>

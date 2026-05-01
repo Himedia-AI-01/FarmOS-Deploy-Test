@@ -213,11 +213,13 @@ function IrrigationModal({ irrigations, onClose }: IrrigationModalProps) {
                   />
                   <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} allowDecimals={false} />
                   <Tooltip
-                    formatter={(value: number, _name: string, props: any) => [
-                      `${value}분`,
-                      `밸브 ${props.payload.valveAction}`,
-                    ]}
-                    labelFormatter={(label: string) => label}
+                    formatter={(value, _name, item) => {
+                      // Recharts v3: value 는 ValueType | undefined, item.payload 에서 valveAction 접근.
+                      if (value == null) return ['-', ''];
+                      const valveAction = item?.payload?.valveAction ?? '-';
+                      return [`${value}분`, `밸브 ${valveAction}`];
+                    }}
+                    labelFormatter={(label) => String(label ?? '')}
                     contentStyle={{ fontSize: 12, borderRadius: 8 }}
                   />
                   <Bar dataKey="duration" radius={[4, 4, 0, 0]} maxBarSize={40}>

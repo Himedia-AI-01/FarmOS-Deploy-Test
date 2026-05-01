@@ -135,7 +135,10 @@ def _build_answer(result: dict, debug: bool) -> ChatAnswer:
         intent=result["intent"],
         escalated=result["escalated"],
         trace=trace,
+        chat_log_id=result.get("chat_log_id"),
+        cited_faq_ids=result.get("cited_faq_ids") or [],
     )
+
 
 
 @router.get("/history")
@@ -268,7 +271,8 @@ def create_session(body: ChatSessionCreate, authenticated_user_id: int = Depends
             )
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
+        logger.error("채팅 세션 생성 오류: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="채팅 세션 생성에 실패했습니다.")
 
     db.refresh(session)
 
@@ -313,24 +317,45 @@ def list_sessions(
         .all()
     )
 
+    if not sessions:
+        return []
+
+    session_ids = [s.id for s in sessions]
+
+    # 메시지 수 일괄 집계
+    count_rows = (
+        db.query(ChatLog.session_id, func.count(ChatLog.id).label("cnt"))
+        .filter(ChatLog.session_id.in_(session_ids))
+        .group_by(ChatLog.session_id)
+        .all()
+    )
+    count_map: dict[int, int] = {r.session_id: r.cnt for r in count_rows}
+
+    # 세션별 마지막 메시지 일괄 조회 (created_at 기준 row_number)
+    from sqlalchemy import func as _func, over
+    from sqlalchemy.orm import aliased
+
+    inner = (
+        db.query(
+            ChatLog.session_id,
+            ChatLog.answer,
+            func.row_number().over(
+                partition_by=ChatLog.session_id,
+                order_by=ChatLog.created_at.desc(),
+            ).label("rn"),
+        )
+        .filter(ChatLog.session_id.in_(session_ids))
+        .subquery()
+    )
+    last_rows = db.query(inner).filter(inner.c.rn == 1).all()
+    preview_map: dict[int, str] = {r.session_id: r.answer for r in last_rows if r.answer}
+
     results = []
     for session in sessions:
         session_dict = ChatSessionResponse.model_validate(session)
-        # Count messages in this session
-        message_count = db.query(ChatLog).filter(ChatLog.session_id == session.id).count()
-        session_dict.message_count = message_count
-
-        # Get the last message for preview
-        last_log = (
-            db.query(ChatLog)
-            .filter(ChatLog.session_id == session.id)
-            .order_by(ChatLog.created_at.desc())
-            .first()
-        )
-        if last_log:
-            # Use the bot's answer as preview (more recent in the conversation)
-            session_dict.message_preview = last_log.answer
-
+        session_dict.message_count = count_map.get(session.id, 0)
+        if session.id in preview_map:
+            session_dict.message_preview = preview_map[session.id]
         results.append(session_dict)
 
     return results

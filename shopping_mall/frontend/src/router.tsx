@@ -23,6 +23,7 @@ import ReportsPage from '@/admin/pages/ReportsPage';
 import AnalyticsPage from '@/admin/pages/AnalyticsPage';
 import ExpensesPage from '@/admin/pages/ExpensesPage';
 import TicketsPage from '@/admin/pages/TicketsPage';
+import FaqPage from '@/admin/pages/FaqPage';
 
 export const router = createBrowserRouter([
   {
@@ -56,6 +57,7 @@ export const router = createBrowserRouter([
       { path: 'reports', element: <ReportsPage /> },
       { path: 'analytics', element: <AnalyticsPage /> },
       { path: 'expenses', element: <ExpensesPage /> },
+      { path: 'faq', element: <FaqPage /> },
     ],
   },
 ]);

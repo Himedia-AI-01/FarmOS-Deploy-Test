@@ -87,6 +87,22 @@ async def lifespan(app: FastAPI):
     await init_db()
     await seed_users()
 
+    # journal-entry-photos: 24h 경과 entry_id=null 인 사진 정리 (boot-time)
+    try:
+        from app.core.photo_storage import cleanup_orphans
+
+        async with async_session() as db:
+            removed = await cleanup_orphans(db, older_than_hours=24)
+            if removed:
+                logging.getLogger(__name__).info(
+                    "journal_photo_orphans.cleaned count=%d", removed
+                )
+    except Exception:  # noqa: BLE001 — cleanup 실패가 기동 막지 않음
+        # exception() 사용 → traceback 포함 자동 기록. 운영자가 즉시 원인 추적 가능.
+        logging.getLogger(__name__).exception(
+            "journal_photo_orphans.cleanup_failed"
+        )
+
     # AI Agent Bridge (agent-action-history) — Relay patch 적용 시 활성화.
     # IOT_RELAY_API_KEY 가 비어 있으면 (env 미주입) 플래그가 켜져도 안전 비활성화한다.
     bridge: AiAgentBridge | None = None

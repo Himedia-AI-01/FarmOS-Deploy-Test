@@ -23,11 +23,11 @@ def _set_langsmith_env() -> None:
 
 
 def build_primary_llm() -> ChatOpenAI:
-    """Primary LLM — OpenAI 호환 엔드포인트 (OpenRouter / Ollama / OpenAI)."""
+    """Primary LLM — OpenAI 호환 엔드포인트 (LiteLLM 프록시 / OpenRouter / OpenAI)."""
     return ChatOpenAI(
-        base_url=settings.primary_llm_base_url,
-        api_key=settings.primary_llm_api_key,
-        model=settings.primary_llm_model,
+        base_url=settings.litellm_url,
+        api_key=settings.litellm_api_key,
+        model=settings.litellm_model,
     )
 
 

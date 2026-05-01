@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from app.core.config import settings
 from app.paths import CHROMA_DB_PATH, AI_DATA_DIR
 from ai.embeddings import get_embedding_function
+from ai.utils import tokenize_ko
 
 DATA_DIR = str(AI_DATA_DIR)
 CHROMA_DIR = CHROMA_DB_PATH
@@ -25,11 +26,11 @@ DOCS_DIR = settings.policy_docs_dir
 BM25_INDEX_PATH = str(AI_DATA_DIR / "bm25_index.json")
 
 # 시딩 대상 전체 컬렉션 — BM25 인덱스 빌드 시 사용
+# storage_guide / season_info / farm_intro 는 faq 컬렉션으로 통합됩니다.
+# (subcategory_slug 메타데이터로 구분: storage | season | farm-info)
+# JSON 모드와 --from-db 모드 모두 동일한 컬렉션 목록을 사용합니다.
 _ALL_COLLECTIONS = [
     "faq",
-    "storage_guide",
-    "season_info",
-    "farm_intro",
     "payment_policy",
     "delivery_policy",
     "return_policy",
@@ -38,11 +39,10 @@ _ALL_COLLECTIONS = [
     "membership_policy",
 ]
 
+# 하위 호환성을 위한 alias (--from-db 모드에서 참조)
+_FAQ_V2_COLLECTIONS = _ALL_COLLECTIONS
 
-def _tokenize_ko(text: str) -> list[str]:
-    """한국어 정규식 토크나이저 — 한글/영문/숫자 단위로 분리."""
-    tokens = re.findall(r"[가-힣a-zA-Z0-9]+", text.lower())
-    return tokens if tokens else [text.lower()]
+
 
 
 def build_bm25_index(client, collection_names: list[str]) -> dict:
@@ -64,7 +64,7 @@ def build_bm25_index(client, collection_names: list[str]) -> dict:
             col = client.get_collection(name=col_name)
             res = col.get(include=["documents"])
             for doc, doc_id in zip(res.get("documents", []), res.get("ids", [])):
-                corpus.append(_tokenize_ko(doc))
+                corpus.append(tokenize_ko(doc))
                 ids.append(doc_id)
                 cols.append(col_name)
         except Exception as e:
@@ -523,7 +523,30 @@ def load_json(filename: str) -> list:
         return json.load(f)
 
 
+# intent 값 → subcategory_slug 매핑.
+# cs_tools.py SearchFaqInput의 subcategory 파라미터 설명 및
+# migrate_json_to_faq_v2.py의 _INTENT_TO_SLUG와 동일한 슬러그를 사용한다.
+# LLM이 subcategory 필터로 넘기는 값과 ChromaDB 메타데이터 값이 일치해야
+# retrieve_with_metadata(where={"subcategory_slug": ...}) 필터가 정상 동작한다.
+#
+# 카테고리 구조: 이커머스 기본 5 + 농산물 특화 5
+#   order / delivery / exchange-return / membership / service
+#   product-quality / certification / storage / season / origin
+_INTENT_TO_SLUG: dict[str, str] = {
+    "delivery":   "delivery",
+    "exchange":   "exchange-return",
+    "cancel":     "exchange-return",
+    "payment":    "order",
+    "membership": "membership",
+    "service":    "service",
+    "product":    "product-quality",
+    "order":      "order",
+    "stock":      "service",
+}
+
+
 def seed_faq(client, ef) -> int:
+    """faq.json → faq 컬렉션. intent 기반 subcategory_slug를 메타데이터에 추가한다."""
     data = load_json("faq.json")
     if not data:
         return 0
@@ -533,12 +556,14 @@ def seed_faq(client, ef) -> int:
     ids, documents, metadatas = [], [], []
     for item in data:
         chunk_text = f"Q: {item['question']}\nA: {item['answer']}"
+        intent = item.get("intent", "")
         ids.append(item["id"])
         documents.append(chunk_text)
         metadatas.append({
             "type": "faq",
-            "intent": item["intent"],
+            "intent": intent,
             "faq_id": item["id"],
+            "subcategory_slug": _INTENT_TO_SLUG.get(intent, "service"),
         })
 
     col.upsert(documents=documents, metadatas=metadatas, ids=ids)
@@ -546,54 +571,76 @@ def seed_faq(client, ef) -> int:
 
 
 def seed_storage_guide(client, ef) -> int:
+    """storage_guide.json → faq 컬렉션 (subcategory_slug='storage').
+
+    구 storage_guide 별도 컬렉션 대신 faq 통합 컬렉션에 적재한다.
+    search_faq(subcategory='storage') 필터가 정상 동작하려면 이 슬러그가
+    cs_tools.py SearchFaqInput 설명의 'storage'와 일치해야 한다.
+    """
     data = load_json("storage_guide.json")
     if not data:
         return 0
 
-    col = client.get_or_create_collection(name="storage_guide", embedding_function=ef)
+    col = client.get_or_create_collection(name="faq", embedding_function=ef)
 
     ids, documents, metadatas = [], [], []
     for item in data:
+        doc_text = f"Q: {item['product']} 보관 방법\nA: {item['guide']}"
         ids.append(item["id"])
-        documents.append(item["guide"])
+        documents.append(doc_text)
         metadatas.append({
             "type": "storage",
             "product_name": item["product"],
             "category": item["category"],
+            "subcategory_slug": "storage",
         })
 
     col.upsert(documents=documents, metadatas=metadatas, ids=ids)
-    return col.count()
+    # 전체 faq 컬렉션 카운트 반환 (storage만 따로 집계 불가)
+    return len(ids)
 
 
 def seed_season_info(client, ef) -> int:
+    """season_info.json → faq 컬렉션 (subcategory_slug='season').
+
+    구 season_info 별도 컬렉션 대신 faq 통합 컬렉션에 적재한다.
+    """
     data = load_json("season_info.json")
     if not data:
         return 0
 
-    col = client.get_or_create_collection(name="season_info", embedding_function=ef)
+    col = client.get_or_create_collection(name="faq", embedding_function=ef)
 
     ids, documents, metadatas = [], [], []
     for item in data:
         products_text = ", ".join(item["products"]) if item["products"] else "없음"
-        doc_text = f"{item['season']} 제철 상품: {products_text}\n{item['description']}"
+        doc_text = (
+            f"Q: {item['season']} 제철 농산물이 뭐가 있나요?\n"
+            f"A: {item['season']} 제철 상품: {products_text}\n{item['description']}"
+        )
         ids.append(item["id"])
         documents.append(doc_text)
         metadatas.append({
             "type": "season",
             "season": item["season"],
+            "subcategory_slug": "season",
         })
 
     col.upsert(documents=documents, metadatas=metadatas, ids=ids)
-    return col.count()
+    return len(ids)
 
 
 def seed_farm_info(client, ef) -> int:
+    """farm_info.json → faq 컬렉션 (subcategory_slug='farm-info').
+
+    구 farm_intro 별도 컬렉션 대신 faq 통합 컬렉션에 적재한다.
+    cs_tools.py SearchFaqInput 설명의 'farm-info' 슬러그와 일치시킨다.
+    """
     data = load_json("farm_info.json")
     if not data:
         return 0
 
-    col = client.get_or_create_collection(name="farm_intro", embedding_function=ef)
+    col = client.get_or_create_collection(name="faq", embedding_function=ef)
 
     ids, documents, metadatas = [], [], []
     for item in data:
@@ -604,10 +651,11 @@ def seed_farm_info(client, ef) -> int:
             "type": "farm_info",
             "category": item["category"],
             "title": item["title"],
+            "subcategory_slug": "farm-info",
         })
 
     col.upsert(documents=documents, metadatas=metadatas, ids=ids)
-    return col.count()
+    return len(ids)
 
 
 # ── 진입점 ─────────────────────────────────────────────────────────────────
@@ -652,8 +700,14 @@ def main():
     # 디스크에 남아 "Nothing found on disk" 오류를 일으키므로 전체 초기화
     import shutil
     if os.path.exists(CHROMA_DIR):
-        shutil.rmtree(CHROMA_DIR)
-        print(f"기존 ChromaDB 삭제: {CHROMA_DIR}")
+        try:
+            shutil.rmtree(CHROMA_DIR)
+            print(f"기존 ChromaDB 삭제: {CHROMA_DIR}")
+        except PermissionError as e:
+            print(f"[오류] ChromaDB 디렉터리를 삭제할 수 없습니다: {e}")
+            print("  → 백엔드 서버(uvicorn)를 종료한 후 다시 실행하세요.")
+            print(f"  → 경로: {CHROMA_DIR}")
+            sys.exit(1)
 
     print(f"ChromaDB 초기화 중... ({CHROMA_DIR})")
     client = chromadb.PersistentClient(path=CHROMA_DIR)
@@ -666,15 +720,18 @@ def main():
         sys.exit(1)
 
     # ── JSON 기반 컬렉션 ──
+    # storage_guide / season_info / farm_info 는 모두 faq 컬렉션에 통합 적재됩니다.
+    # subcategory_slug 메타데이터로 구분: storage | season | farm-info | (기타 FAQ)
     print("\n[JSON 컬렉션 적재]")
     faq_count = seed_faq(client, ef)
-    print(f"  faq: {faq_count}개")
+    print(f"  faq (FAQ 항목): {faq_count}개")
     storage_count = seed_storage_guide(client, ef)
-    print(f"  storage_guide: {storage_count}개")
+    print(f"  faq (보관법, subcategory_slug=storage): {storage_count}개")
     season_count = seed_season_info(client, ef)
-    print(f"  season_info: {season_count}개")
+    print(f"  faq (제철정보, subcategory_slug=season): {season_count}개")
     farm_count = seed_farm_info(client, ef)
-    print(f"  farm_intro: {farm_count}개")
+    print(f"  faq (농장소개, subcategory_slug=farm-info): {farm_count}개")
+    print(f"  → faq 컬렉션 합계: {faq_count + storage_count + season_count + farm_count}개")
 
     # ── 정책 문서 적재 ──
     print(f"\n[정책 문서 적재] 경로: {DOCS_DIR}")
@@ -703,5 +760,104 @@ def main():
     return client, ef
 
 
+
+# ── DB 기반 시딩 (⑤ 마이그레이션 이후 사용) ────────────────────────────────────
+
+def seed_from_db(client, ef) -> int:
+    """PostgreSQL FaqDoc 테이블에서 읽어 ChromaDB에 적재합니다.
+
+    migrate_json_to_faq_v2.py 실행 이후 사용합니다.
+    JSON 파일 대신 DB가 단일 진실 소스 역할을 합니다.
+
+    Returns:
+        upsert된 총 문서 수
+    """
+    import sys
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+    from sqlalchemy.orm import joinedload
+
+    from app.database import SessionLocal
+    from app.models.faq_doc import FaqDoc
+
+    db = SessionLocal()
+    total = 0
+    try:
+        docs = (
+            db.query(FaqDoc)
+            .options(joinedload(FaqDoc.faq_category))
+            .filter(FaqDoc.is_active.is_(True))
+            .all()
+        )
+        # 컬렉션별로 묶어서 일괄 upsert
+        by_collection: dict[str, list] = {}
+        for doc in docs:
+            by_collection.setdefault(doc.chroma_collection, []).append(doc)
+
+        for col_name, col_docs in by_collection.items():
+            col = client.get_or_create_collection(name=col_name, embedding_function=ef)
+            col.upsert(
+                ids=[d.chroma_doc_id for d in col_docs],
+                documents=[d.to_chroma_document() for d in col_docs],
+                metadatas=[d.to_chroma_metadata() for d in col_docs],
+            )
+            print(f"  {col_name}: {len(col_docs)}개 upsert")
+            total += len(col_docs)
+    finally:
+        db.close()
+
+    return total
+
+
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="ChromaDB RAG 데이터 적재")
+    parser.add_argument(
+        "--from-db",
+        action="store_true",
+        help="JSON 파일 대신 PostgreSQL FaqDoc 테이블에서 시딩 (migrate_json_to_faq_v2.py 실행 후 사용)",
+    )
+    args = parser.parse_args()
+
+    if args.from_db:
+        # ── DB 기반 시딩 ──
+        try:
+            import chromadb as _chromadb
+        except ImportError:
+            print("[오류] chromadb 설치 필요: uv add chromadb")
+            sys.exit(1)
+
+        import shutil
+        if os.path.exists(CHROMA_DIR):
+            try:
+                shutil.rmtree(CHROMA_DIR)
+                print(f"기존 ChromaDB 삭제: {CHROMA_DIR}")
+            except PermissionError as e:
+                print(f"[오류] ChromaDB 디렉터리를 삭제할 수 없습니다: {e}")
+                print("  → 백엔드 서버(uvicorn)를 종료한 후 다시 실행하세요.")
+                print(f"  → 경로: {CHROMA_DIR}")
+                sys.exit(1)
+
+        _client = _chromadb.PersistentClient(path=CHROMA_DIR)
+        _ef = get_embedding_function()
+
+        print("\n[DB 기반 JSON 컬렉션 시딩]")
+        db_count = seed_from_db(_client, _ef)
+        print(f"  합계: {db_count}개")
+
+        print("\n[정책 문서 적재]")
+        for fpath, collection in find_policy_files():
+            seed_policy_collection(_client, _ef, fpath, collection)
+
+        print("\n[BM25 인덱스 빌드]")
+        # --from-db 모드: storage_guide/season_info/farm_intro는 faq로 통합됐으므로
+        # _FAQ_V2_COLLECTIONS 사용 (구 분리 컬렉션 미존재)
+        bm25_data = build_bm25_index(_client, _FAQ_V2_COLLECTIONS)
+        with open(BM25_INDEX_PATH, "w", encoding="utf-8") as _f:
+            json.dump(bm25_data, _f, ensure_ascii=False)
+        print(f"  저장: {BM25_INDEX_PATH} ({len(bm25_data['ids'])}개 문서)")
+        print(f"\n완료 (DB 모드). ChromaDB 경로: {os.path.abspath(CHROMA_DIR)}")
+    else:
+        # ── 기존 JSON 기반 시딩 ──
+        main()

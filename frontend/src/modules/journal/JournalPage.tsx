@@ -14,8 +14,10 @@ import JournalEntryForm, {
   type JournalEntryFormHandle,
 } from "./JournalEntryForm";
 import STTInput, { type STTInputHandle } from "./STTInput";
+import PhotoInput, { type PhotoInputHandle } from "./PhotoInput";
+import PhotoLightbox from "./PhotoLightbox";
+import AuthenticatedPhoto from "./AuthenticatedPhoto";
 import MissingFieldsAlert from "./MissingFieldsAlert";
-import DailySummaryCard from "./DailySummaryCard";
 import DailyJournalPanel from "./DailyJournalPanel";
 import type { JournalEntryAPI, STTParseResult } from "@/types";
 import { toLocalDateString } from "@/utils/date";
@@ -50,7 +52,9 @@ export default function JournalPage() {
     deleteEntry,
     parseSTT,
     transcribeAudio,
-    fetchDailySummary,
+    parsePhotos,
+    uploadPhoto,
+    deletePhoto,
     fetchMissingFields,
   } = useJournalData();
   const [filter, setFilter] = useState<string>("all");
@@ -61,15 +65,24 @@ export default function JournalPage() {
   const [sttPrefill, setSttPrefill] = useState<Record<string, unknown> | null>(
     null,
   );
-  // 다중 엔트리 상태 (STT가 여러 작업을 감지한 경우)
+  // 다중 엔트리 상태 (STT/Vision이 여러 작업을 감지한 경우)
   const [sttEntries, setSttEntries] = useState<Record<string, unknown>[]>([]);
   const [currentEntryIdx, setCurrentEntryIdx] = useState(0);
+  // 마지막으로 prefill 을 채운 입력 채널 — 저장 시 source 필드로 사용
+  const [inputSource, setInputSource] = useState<"stt" | "vision" | "text">("text");
+  // 폼 remount 강제용 — prefill 이 바뀔 때마다 증가시켜 React 가 form 을 새로 mount
+  const [prefillVersion, setPrefillVersion] = useState(0);
+  // parse-photos 응답으로 미리 저장된 사진 ID — 폼 첨부 사진 초기값 (신규 entry)
+  const [pendingPhotoIds, setPendingPhotoIds] = useState<number[]>([]);
+  // 타임라인 사진 클릭 시 lightbox 표시
+  const [lightboxPhotoId, setLightboxPhotoId] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   // DailyJournalPanel에 "지금 entry 목록 다시 보세요" 신호를 보내는 토큰.
   // entry 생성/수정/삭제 직후 증가시키면 Panel이 즉시 stale 카운트를 재계산함.
   const [panelRefreshToken, setPanelRefreshToken] = useState(0);
   const bumpPanel = () => setPanelRefreshToken((t) => t + 1);
   const sttRef = useRef<STTInputHandle>(null);
+  const photoRef = useRef<PhotoInputHandle>(null);
   const formRef = useRef<JournalEntryFormHandle>(null);
 
   const handleRequestRecord = () => {
@@ -107,6 +120,7 @@ export default function JournalPage() {
     setEditingEntry(null);
     setSttEntries([]);
     setCurrentEntryIdx(0);
+    setPendingPhotoIds([]);
   };
 
   useEffect(() => {
@@ -126,7 +140,7 @@ export default function JournalPage() {
           unknown
         >;
         void _u;
-        const r = await createEntry({ ...cleanEntry, source: "stt" });
+        const r = await createEntry({ ...cleanEntry, source: inputSource });
         if (r) okCount += 1;
       }
       if (okCount === allEntries.length) {
@@ -140,7 +154,12 @@ export default function JournalPage() {
       return;
     }
 
-    const result = await createEntry(data);
+    // 입력 채널(stt/vision/text)을 inputSource state 로 추적하므로 그대로 source 에 적용.
+    // - "새 일지" 버튼 → "text"
+    // - STT 인식 prefill → "stt"
+    // - Vision prefill 또는 거절 후 사용자 직접 진행 → "vision"
+    const finalData = { ...data, source: inputSource };
+    const result = await createEntry(finalData);
     if (result) {
       toast.success("영농일지가 저장되었습니다.");
       closeForm();
@@ -198,10 +217,67 @@ export default function JournalPage() {
       toast.success(`${entries.length}건의 작업이 감지되었습니다.`);
     }
 
+    setInputSource("stt");
     setSttEntries(entries);
     setCurrentEntryIdx(0);
     setSttPrefill(entries[0]);
     setEditingEntry(null);
+    setPrefillVersion((v) => v + 1);
+    setShowForm(true);
+  };
+
+  const handlePhotoParsed = (result: STTParseResult) => {
+    if (result.rejected || !result.entries || result.entries.length === 0) {
+      // LLM 재현율은 100%가 아니므로 거절을 hard block 으로 만들지 않는다.
+      // 사용자에게 "그래도 직접 작성?" 선택권을 주고, 확인 시 빈 폼을 연다.
+      // setTimeout 으로 confirm 호출을 다음 task 로 미루어, 자식 PhotoInput 의
+      // setStatus("idle") 이 먼저 적용되어 분석 오버레이가 unmount 된 후 confirm
+      // 다이얼로그가 뜨도록 한다 (sync confirm 이 자식 re-render 와 race 하던 문제).
+      const reason =
+        result.reject_reason || "사진에서 영농 작업 단서를 찾지 못했습니다.";
+      const photoIdsFromReject =
+        (result as { photo_ids?: number[] }).photo_ids ?? [];
+      setTimeout(() => {
+        const proceed = window.confirm(
+          `${reason}\n\n그래도 영농일지를 직접 작성하시겠어요?`,
+        );
+        if (!proceed) return;
+        setInputSource("vision");
+        setSttEntries([]);
+        setCurrentEntryIdx(0);
+        setSttPrefill(null);
+        setEditingEntry(null);
+        // 거절 응답에도 photo_ids 가 함께 와서 사진은 디스크에 저장돼있음 — 첨부 살림
+        setPendingPhotoIds(photoIdsFromReject);
+        setPrefillVersion((v) => v + 1);
+        setShowForm(true);
+      }, 0);
+      return;
+    }
+
+    const entries = result.entries.map((e) => {
+      const match = e.pesticide_match as { uncertain?: boolean } | null;
+      return {
+        ...(e.parsed as Record<string, unknown>),
+        _pesticide_uncertain: Boolean(match?.uncertain),
+      };
+    });
+
+    if (entries.length === 1) {
+      toast.success("사진이 분석되었습니다. 확인 후 저장하세요.");
+    } else {
+      toast.success(`사진에서 ${entries.length}건의 작업이 감지되었습니다.`);
+    }
+
+    setInputSource("vision");
+    setSttEntries(entries);
+    setCurrentEntryIdx(0);
+    setSttPrefill(entries[0]);
+    setEditingEntry(null);
+    setPendingPhotoIds(
+      (result as { photo_ids?: number[] }).photo_ids ?? [],
+    );
+    setPrefillVersion((v) => v + 1);
     setShowForm(true);
   };
 
@@ -285,7 +361,12 @@ export default function JournalPage() {
             onClick={() => {
               setShowForm(true);
               setSttPrefill(null);
+              setSttEntries([]);
+              setCurrentEntryIdx(0);
               setEditingEntry(null);
+              setInputSource("text");
+              setPendingPhotoIds([]);
+              setPrefillVersion((v) => v + 1);
             }}
             className="btn-primary text-sm"
           >
@@ -313,6 +394,18 @@ export default function JournalPage() {
         parseSTT={parseSTT}
         transcribeAudio={transcribeAudio}
         sttContext={
+          entries.length > 0
+            ? { field_name: entries[0].field_name, crop: entries[0].crop }
+            : undefined
+        }
+      />
+
+      {/* 사진 입력 FAB (항상 렌더링) */}
+      <PhotoInput
+        ref={photoRef}
+        onParsed={handlePhotoParsed}
+        parsePhotos={parsePhotos}
+        photoContext={
           entries.length > 0
             ? { field_name: entries[0].field_name, crop: entries[0].crop }
             : undefined
@@ -377,7 +470,7 @@ export default function JournalPage() {
             <div className="px-5 pb-6 pt-4">
               <JournalEntryForm
                 ref={formRef}
-                key={`${editingEntry?.id || "new"}-${currentEntryIdx}`}
+                key={`${editingEntry?.id || "new"}-${currentEntryIdx}-${prefillVersion}`}
                 initialData={editingEntry || prefillAsEntry}
                 isEdit={!!editingEntry}
                 onSubmit={editingEntry ? handleUpdate : handleCreate}
@@ -392,6 +485,11 @@ export default function JournalPage() {
                   !editingEntry &&
                   Boolean(sttPrefill?._pesticide_uncertain)
                 }
+                initialPhotoIds={
+                  editingEntry ? undefined : pendingPhotoIds
+                }
+                uploadPhoto={uploadPhoto}
+                deletePhoto={deletePhoto}
               />
             </div>
           </div>
@@ -451,7 +549,7 @@ export default function JournalPage() {
               <div key={entry.id} className="flex gap-4 relative">
                 <div className="flex flex-col items-center">
                   <div
-                    className={`w-3 h-3 rounded-full ${entry.source === "stt" ? "bg-red-400" : "bg-primary"} z-10`}
+                    className={`w-3 h-3 rounded-full ${entry.source === "stt" ? "bg-red-400" : entry.source === "vision" ? "bg-amber-400" : "bg-primary"} z-10`}
                   />
                   {i < grouped[dateStr].length - 1 && (
                     <div className="w-0.5 flex-1 bg-gray-200" />
@@ -578,8 +676,42 @@ export default function JournalPage() {
                           </div>
                         )}
                       </div>
+
+                      {entry.photos && entry.photos.length > 0 && (
+                        <div className="mt-3">
+                          <span className="text-xs font-medium text-gray-400 mb-1 block">
+                            첨부 사진 ({entry.photos.length})
+                          </span>
+                          {/* 화면 폭과 무관하게 일정한 썸네일 크기 — PC 에서도 과하게 커지지 않도록 고정 */}
+                          <div className="flex flex-wrap gap-2">
+                            {entry.photos.map((p) => (
+                              <button
+                                key={p.id}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setLightboxPhotoId(p.id);
+                                }}
+                                className="w-24 h-24 rounded-lg overflow-hidden border border-gray-200 bg-gray-50 cursor-zoom-in hover:opacity-80 transition-opacity"
+                              >
+                                <AuthenticatedPhoto
+                                  photoId={p.id}
+                                  thumb
+                                  className="w-full h-full object-cover"
+                                />
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       <div className="text-xs text-gray-300 mt-3">
-                        {entry.source === "stt" ? "음성 입력" : "직접 입력"} |{" "}
+                        {entry.source === "stt"
+                          ? "음성 입력"
+                          : entry.source === "vision"
+                            ? "사진 입력"
+                            : "직접 입력"}{" "}
+                        |{" "}
                         {new Date(entry.created_at).toLocaleString("ko-KR")}
                       </div>
                     </div>
@@ -590,6 +722,13 @@ export default function JournalPage() {
           </div>
         ))}
       </div>
+
+      {lightboxPhotoId !== null && (
+        <PhotoLightbox
+          photoId={lightboxPhotoId}
+          onClose={() => setLightboxPhotoId(null)}
+        />
+      )}
     </div>
   );
 }

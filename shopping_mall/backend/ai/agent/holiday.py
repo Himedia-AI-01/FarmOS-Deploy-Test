@@ -53,16 +53,25 @@ async def _fetch_holidays(year: int, month: int, api_key: str) -> set[date]:
 
         return holidays
 
-    except (httpx.HTTPError, KeyError, ValueError) as e:
+    except (httpx.HTTPError, KeyError, ValueError, AttributeError) as e:
         logger.warning("공휴일 API 조회 실패 (%d-%02d): %s", year, month, e)
-        return set()
+        raise
 
 
 async def get_holidays(year: int, month: int, api_key: str) -> set[date]:
-    """캐싱된 공휴일 set 반환. 캐시 없으면 API 호출."""
+    """캐싱된 공휴일 set 반환. 캐시 없으면 API 호출.
+
+    API 호출 실패 시 캐시를 갱신하지 않고 빈 set을 반환하므로
+    다음 호출에서 재시도가 이루어집니다.
+    """
     key = (year, month)
     if key not in _cache:
-        _cache[key] = await _fetch_holidays(year, month, api_key)
+        try:
+            result = await _fetch_holidays(year, month, api_key)
+        except Exception:
+            # 실패 시 캐시 미기록 — 다음 호출에서 재시도
+            return set()
+        _cache[key] = result
     return _cache[key]
 
 

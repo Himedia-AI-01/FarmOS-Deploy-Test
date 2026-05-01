@@ -8,7 +8,7 @@ from app.schemas.product import ProductListResponse, ProductListItem, ProductDet
 router = APIRouter(prefix="/api/products", tags=["products"])
 
 
-@router.get("/", response_model=ProductListResponse)
+@router.get("", response_model=ProductListResponse)
 def list_products(
     page: int = 1,
     limit: int = 20,

@@ -92,6 +92,11 @@ class MultiAgentChatbotService:
 
         db.commit()
 
+        # FAQ 인용 기록 저장 (cited_faq_ids가 있을 때만, 별도 트랜잭션)
+        cited_faq_ids = getattr(result, "cited_faq_ids", [])
+        if cited_faq_ids:
+            self._save_faq_citations(db, cited_faq_ids, log.id)
+
         # 메트릭 저장 (ChatLog commit 이후 별도 트랜잭션)
         if result.metrics:
             self._save_metrics(db, result.metrics, log.id, session_id)
@@ -101,7 +106,28 @@ class MultiAgentChatbotService:
             "intent": result.intent,
             "escalated": result.escalated,
             "trace": result.trace,
+            "chat_log_id": log.id,
+            "cited_faq_ids": cited_faq_ids,
         }
+
+    def _save_faq_citations(
+        self,
+        db: Session,
+        faq_ids: list[int],
+        chat_log_id: int,
+    ) -> None:
+        """search_faq가 인용한 FAQ 문서를 FaqCitation 테이블에 저장합니다."""
+        try:
+            from app.models.faq_citation import FaqCitation
+
+            db.add_all([
+                FaqCitation(chat_log_id=chat_log_id, faq_doc_id=faq_id)
+                for faq_id in faq_ids
+            ])
+            db.commit()
+        except Exception as e:
+            logger.warning("FAQ 인용 저장 실패: %s", e)
+            db.rollback()
 
     def _save_metrics(
         self,

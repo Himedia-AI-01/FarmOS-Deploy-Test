@@ -1,6 +1,8 @@
-import { useState, forwardRef, useImperativeHandle } from "react";
-import { MdExpandMore, MdExpandLess, MdMic } from "react-icons/md";
+import { useState, useRef, forwardRef, useImperativeHandle } from "react";
+import { MdExpandMore, MdExpandLess, MdMic, MdClose, MdAddPhotoAlternate } from "react-icons/md";
 import type { JournalEntryAPI } from "@/types";
+
+import AuthenticatedPhoto from "./AuthenticatedPhoto";
 
 export interface JournalEntryFormHandle {
   getFormData: () => Record<string, unknown>;
@@ -25,6 +27,13 @@ interface Props {
   submitLabel?: string;
   headerSlot?: React.ReactNode;
   pesticideUncertain?: boolean;
+
+  /** parse-photos 응답으로 미리 저장된 사진 ID — 신규 entry 첨부에 사용 */
+  initialPhotoIds?: number[];
+  /** 사진 추가 (분석 없이 단순 업로드) */
+  uploadPhoto?: (file: File) => Promise<number | null>;
+  /** 사진 명시적 삭제 (× 버튼) */
+  deletePhoto?: (photoId: number) => Promise<boolean>;
 }
 
 const JournalEntryForm = forwardRef<JournalEntryFormHandle, Props>(
@@ -38,6 +47,9 @@ const JournalEntryForm = forwardRef<JournalEntryFormHandle, Props>(
       submitLabel,
       headerSlot,
       pesticideUncertain = false,
+      initialPhotoIds,
+      uploadPhoto,
+      deletePhoto,
     },
     ref,
   ) {
@@ -74,6 +86,55 @@ const JournalEntryForm = forwardRef<JournalEntryFormHandle, Props>(
     );
     const [submitting, setSubmitting] = useState(false);
 
+    // 첨부 사진 ID 목록 — 편집 모드는 entry.photos 에서, 신규는 prop.initialPhotoIds 에서.
+    const [photoIds, setPhotoIds] = useState<number[]>(
+      initialData?.photos?.map((p) => p.id) ?? initialPhotoIds ?? [],
+    );
+    // 폼 진입 시점의 "기존" 사진 ID 집합 — useRef 로 평생 고정 (첫 mount 값 그대로 유지).
+    // ✕ 누른 사진이 originalPhotoIds 에 속하면 즉시 삭제하지 않고 PATCH reconcile
+    // 시점에만 BE 가 정리하도록 미룬다. 그래야 사용자가 편집 중 취소했을 때
+    // 원본 entry 의 사진이 손실되지 않는다 (CodeRabbit 리뷰).
+    const originalPhotoIdsRef = useRef<Set<number>>(
+      new Set(initialData?.photos?.map((p) => p.id) ?? []),
+    );
+    const [photoBusy, setPhotoBusy] = useState(false);
+
+    const handleAddPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (!uploadPhoto) return;
+      const file = e.target.files?.[0];
+      e.target.value = ""; // 같은 파일 재선택 가능하도록
+      if (!file) return;
+      setPhotoBusy(true);
+      try {
+        const id = await uploadPhoto(file);
+        if (id != null) setPhotoIds((prev) => [...prev, id]);
+      } finally {
+        setPhotoBusy(false);
+      }
+    };
+
+    const handleRemovePhoto = async (id: number) => {
+      // state 에서 즉시 제거 (UI 반응 빠름)
+      setPhotoIds((prev) => prev.filter((p) => p !== id));
+
+      // 기존 사진(편집 시작 시점에 entry 와 연결된 사진) 은 즉시 삭제 X.
+      // 사용자가 저장하지 않고 폼을 닫으면 원본 entry 에 그대로 남아있어야 한다.
+      // 저장 시 PATCH 의 photo_ids reconcile 이 BE 측에서 정리한다.
+      if (originalPhotoIdsRef.current.has(id)) {
+        return;
+      }
+
+      // 신규 추가한 임시 사진 (이번 세션에서 uploadPhoto 로 올린 것) 만 즉시 삭제.
+      // 이건 폼을 취소해도 어차피 entry 와 연결되지 않은 orphan 이라 누수 회피용.
+      if (deletePhoto) {
+        try {
+          await deletePhoto(id);
+        } catch {
+          // 실패해도 UI 는 이미 제거됨; orphan cleanup 으로 후속 처리
+        }
+      }
+    };
+
     const buildBody = (): Record<string, unknown> => ({
       work_date: workDate,
       field_name: fieldName.trim(),
@@ -86,6 +147,7 @@ const JournalEntryForm = forwardRef<JournalEntryFormHandle, Props>(
       usage_fertilizer_amount: usageFertilizerAmount || null,
       detail: detail || null,
       source: "text",
+      photo_ids: photoIds,
     });
 
     useImperativeHandle(ref, () => ({ getFormData: buildBody }));
@@ -93,6 +155,9 @@ const JournalEntryForm = forwardRef<JournalEntryFormHandle, Props>(
     const handleSubmit = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!fieldName.trim() || !crop.trim()) return;
+      // 사진 업로드 진행 중이면 submit 차단 — 업로드 완료 전 buildBody() 가
+      // 부르면 photo_ids 에 새 사진 ID 가 빠져 첨부 유실 + orphan 발생.
+      if (photoBusy) return;
 
       setSubmitting(true);
       await onSubmit(buildBody());
@@ -148,7 +213,7 @@ const JournalEntryForm = forwardRef<JournalEntryFormHandle, Props>(
             </label>
             <select
               value={workStage}
-              onChange={(e) => setWorkStage(e.target.value)}
+              onChange={(e) => setWorkStage(e.target.value as typeof workStage)}
               className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/30"
             >
               {WORK_STAGES.map((s) => (
@@ -260,6 +325,56 @@ const JournalEntryForm = forwardRef<JournalEntryFormHandle, Props>(
           )}
         </div>
 
+        {/* 첨부 사진 */}
+        {(uploadPhoto || photoIds.length > 0) && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              첨부 사진 {photoIds.length > 0 && `(${photoIds.length})`}
+            </label>
+            <div className="grid grid-cols-4 gap-2">
+              {photoIds.map((id) => (
+                <div
+                  key={id}
+                  className="relative aspect-square rounded-lg overflow-hidden border border-gray-200 bg-gray-50"
+                >
+                  <AuthenticatedPhoto
+                    photoId={id}
+                    thumb
+                    className="w-full h-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleRemovePhoto(id)}
+                    className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center cursor-pointer"
+                    aria-label="사진 제거"
+                  >
+                    <MdClose className="text-sm" />
+                  </button>
+                </div>
+              ))}
+              {uploadPhoto && (
+                <label
+                  className={`aspect-square rounded-lg border-2 border-dashed border-gray-300 flex flex-col items-center justify-center text-gray-400 cursor-pointer hover:border-primary hover:text-primary ${
+                    photoBusy ? "opacity-50 pointer-events-none" : ""
+                  }`}
+                >
+                  <MdAddPhotoAlternate className="text-2xl" />
+                  <span className="text-xs mt-1">
+                    {photoBusy ? "추가 중" : "사진 추가"}
+                  </span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    className="hidden"
+                    onChange={handleAddPhoto}
+                  />
+                </label>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* 세부작업내용 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -294,12 +409,17 @@ const JournalEntryForm = forwardRef<JournalEntryFormHandle, Props>(
           </button>
           <button
             type="submit"
-            disabled={submitting || !fieldName.trim() || !crop.trim()}
+            disabled={
+              submitting || photoBusy || !fieldName.trim() || !crop.trim()
+            }
             className="btn-primary disabled:opacity-50"
+            title={photoBusy ? "사진 업로드 중에는 저장할 수 없습니다." : undefined}
           >
             {submitting
               ? "저장 중..."
-              : submitLabel || (isEdit ? "수정" : "등록")}
+              : photoBusy
+                ? "사진 업로드 중..."
+                : submitLabel || (isEdit ? "수정" : "등록")}
           </button>
         </div>
       </form>

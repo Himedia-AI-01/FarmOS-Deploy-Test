@@ -26,7 +26,7 @@ from ai.agent.responses import (
 
 logger = logging.getLogger(__name__)
 
-# 취소/교환 의도 감지 키워드
+# 취소/교환 의도 감지 키워드 (_detect_order_action에서 사용)
 _CANCEL_KEYWORDS: frozenset[str] = frozenset({"취소", "cancel", "환불"})
 _EXCHANGE_KEYWORDS: frozenset[str] = frozenset({
     "교환", "exchange", "반품", "교체",
@@ -34,11 +34,19 @@ _EXCHANGE_KEYWORDS: frozenset[str] = frozenset({
     "썩음", "곰팡이", "망가", "깨짐", "냄새", "이상해", "상했",
 })
 
-# 접수 액션 의도 동사 — 정책 문의("반품 정책이 뭐야?")와 실제 접수("반품해줘")를 구분
-# 공백 없는 형태("하고싶어")와 존댓말 어미("하고 싶습니다")를 함께 등록
-_ORDER_ACTION_VERBS: frozenset[str] = frozenset({
-    "하고 싶어", "하고싶어", "하고 싶습니다", "하고싶습니다",
-    "신청", "접수", "해줘", "해주세요", "하려고", "원해",
+# LLM 없이 OrderGraph로 직접 라우팅하는 명확한 접수 패턴.
+# 단순 언급·문의가 아니라 "접수 실행" 의도가 명확한 복합 표현만 포함합니다.
+# 이 외 모든 메시지는 Supervisor LLM(_run_loop)이 판단합니다.
+_ORDER_FASTPATH_PATTERNS: frozenset[str] = frozenset({
+    # 동사 결합형
+    "취소해줘", "취소해주세요", "취소해",
+    "교환해줘", "교환해주세요", "교환해",
+    "반품해줘", "반품해주세요", "반품해",
+    "환불해줘", "환불해주세요", "환불해",
+    # 신청/접수 명사형
+    "취소 신청", "취소신청",
+    "교환 신청", "교환신청",
+    "반품 신청", "반품신청",
 })
 
 # CS 에이전트가 교환/반품 선택지를 제시한 직후 사용자 응답을 OrderGraph로 라우팅
@@ -157,10 +165,10 @@ class SupervisorExecutor:
                 tools_used=["call_order_agent"],
             )
 
-        # 3순위: 키워드 fast-path — Supervisor LLM 호출 생략 (~1 LLM 왕복 절약)
-        # _fast_route가 None을 반환하면 Supervisor LLM(_run_loop)에 최종 판단 위임
-        route = _fast_route(user_message)
-        if route == "order":
+        # 3순위: 명확한 접수 패턴 fast-path — Supervisor LLM 호출 생략
+        # 동사 결합형·신청 명사형처럼 접수 의도가 100% 명확한 패턴만 해당합니다.
+        # 그 외 모든 경우(정책 문의, 단순 키워드, 애매한 표현)는 Supervisor LLM이 판단합니다.
+        if _is_order_fastpath(user_message):
             if not user_id or not session_id:
                 return AgentResult(
                     answer=LOGIN_REQUIRED,
@@ -175,29 +183,17 @@ class SupervisorExecutor:
                 escalated=False,
                 tools_used=["call_order_agent"],
             )
-        elif route == "cs":
-            # 명확한 CS 케이스 — CS 에이전트 직접 호출
-            tc_dummy = {"args": {"query": user_message}}
-            _, cs_result, _ = await self._timed_cs_call(tc_dummy, db, user_id, session_id)
-            return AgentResult(
-                answer=_parse_answer(cs_result.answer),
-                intent=cs_result.intent,
-                escalated=cs_result.escalated,
-                tools_used=["call_cs_agent"] + cs_result.tools_used,
-                trace=cs_result.trace,
-                metrics=cs_result.metrics,
-            )
-        else:
-            # route is None — 불명확한 경우, Supervisor LLM에 최종 판단 위임
-            return await self._run_loop(
-                db=db,
-                user_message=user_message,
-                user_id=user_id,
-                session_id=session_id,
-                history=history,
-                input_system=input_with_ctx,
-                output_system=output_system,
-            )
+
+        # 4순위: Supervisor LLM — CS / Order 에이전트 선택을 LLM에 위임
+        return await self._run_loop(
+            db=db,
+            user_message=user_message,
+            user_id=user_id,
+            session_id=session_id,
+            history=history,
+            input_system=input_with_ctx,
+            output_system=output_system,
+        )
 
     # ── 루프 ──────────────────────────────────────────────────────────────────
 
@@ -480,63 +476,30 @@ class SupervisorExecutor:
 # ── 헬퍼 ───────────────────────────────────────────────────────────────────────
 
 
-# 정책 문의를 나타내는 단어 — 있으면 action verb가 있어도 CS로 라우팅
-# "원해", "되나요", "가능한가요"는 "취소 원해요" 같은 접수 의도와 겹치므로 제거
-_POLICY_INQUIRY_WORDS: frozenset[str] = frozenset({
-    "정책", "규정", "절차", "방법", "어떻게", "뭐야", "뭔가요", "알고 싶",
-    "안내", "알려줘", "설명", "궁금",
-})
+def _is_order_fastpath(user_message: str) -> bool:
+    """접수 실행 의도가 명확한 패턴인지 확인 — Supervisor LLM 호출 생략 조건.
 
-# order 키워드와 action verb 사이 최대 허용 문자 거리
-_MAX_KW_VERB_DISTANCE: int = 30
-
-
-def _fast_route(user_message: str) -> str | None:
-    """키워드 기반 사전 라우팅 — Supervisor LLM 호출 없이 라우팅 결정.
-
-    반환값:
-      'order' — 명확한 접수 의도 감지 (키워드 + 동사 근접 + 정책 문의 없음)
-      'cs'    — 명확한 CS 문의 감지 (정책 문의 단어 포함)
-      None    — 불명확, Supervisor LLM(_run_loop)에 판단 위임
-
-    Order 라우팅 조건 (모두 충족해야 함):
-      1. 취소·교환·반품 키워드 포함
-      2. 접수 의도 동사 포함
-      3. 키워드와 동사가 30자 이내 근접 (동사가 문장 다른 곳에 있는 경우 제외)
-      4. 정책 문의 단어가 없음 ("반품 정책이 어떻게 되나요?" → CS)
+    _ORDER_FASTPATH_PATTERNS에 정의된 복합 표현이 메시지에 단어 경계로 포함된 경우만 True를 반환합니다.
+    패턴 앞뒤에 한글 글자가 이어지면 False — 부분 단어 오매칭 방지.
+    단순 키워드 언급("취소"), 정책 문의("취소 방법"), 애매한 표현은 모두 False → LLM이 판단.
 
     예시:
-      "반품 정책이 뭐야?"       → 'cs'    (정책 문의 단어 포함)
-      "교환해주세요"            → 'order' (키워드+동사 근접)
-      "취소 신청하고 싶어요"    → 'order' (키워드+동사 근접)
-      "딸기 맛있나요?"          → None    (order 키워드 없고 정책 문의도 없음 → LLM 판단)
+      "이 주문 취소해줘"          → True  (패턴 앞뒤 경계 확인)
+      "교환 신청"                 → True  (패턴 정확 일치)
+      "교환신청서 작성방법"       → False (패턴 뒤 한글 '서' 연속 → 오매칭 방지)
+      "취소해줘야 하나요?"        → False (패턴 뒤 한글 '야' 연속 → 오매칭 방지)
+      "취소 방법 알려줘"          → False (LLM 판단)
+      "교환하면 비용 드나요?"     → False (LLM 판단)
+      "취소"                      → False (LLM 판단)
     """
-    q = user_message.lower()
-
-    # 정책 문의 단어가 있으면 명확한 CS
-    if any(w in q for w in _POLICY_INQUIRY_WORDS):
-        return "cs"
-
-    all_order_kws = _EXCHANGE_KEYWORDS | _CANCEL_KEYWORDS
-    # 키워드와 동사가 30자 이내에 함께 등장하는지 확인
-    has_order_kw = False
-    for kw in all_order_kws:
-        kw_pos = q.find(kw)
-        if kw_pos == -1:
-            continue
-        has_order_kw = True
-        for verb in _ORDER_ACTION_VERBS:
-            verb_pos = q.find(verb)
-            if verb_pos != -1 and abs(kw_pos - verb_pos) <= _MAX_KW_VERB_DISTANCE:
-                return "order"
-
-    # order 키워드가 있지만 동사가 없는 경우 — 애매하므로 LLM에 위임
-    # order 키워드 자체가 없는 경우도 LLM에 위임
-    if not has_order_kw:
-        return None
-
-    # order 키워드는 있지만 동사 근접 조건 불충족 → LLM 위임
-    return None
+    msg = user_message.strip().lower()
+    for p in _ORDER_FASTPATH_PATTERNS:
+        # 패턴 내 공백은 \s* 로 대체 (띄어쓰기 변형 허용)
+        # 앞뒤에 한글 완성형 글자(AC00–D7A3)가 없어야 함 — 부분 단어 일치 방지
+        pattern = r'(?<![가-힣])' + re.sub(r'\s+', r'\\s*', re.escape(p)) + r'(?![가-힣])'
+        if re.search(pattern, msg):
+            return True
+    return False
 
 
 def _detect_order_action(query: str) -> str:

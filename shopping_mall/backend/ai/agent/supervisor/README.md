@@ -71,61 +71,59 @@ SupervisorExecutor.run()
   ├─ 1. _has_pending_order_flow(session_id) 확인
   │       └─ 진행 중인 OrderGraph 플로우가 있으면 즉시 OrderGraph로 전달 (Supervisor LLM 생략)
   │
-  └─ 2. (없으면) _fast_route() 키워드 라우팅 (Supervisor LLM 생략)
-          │
-          ├─ 정책 조회 단어 포함 → cs (정책/규정 설명 요청은 OrderGraph 불필요)
-          │
-          ├─ 취소·교환 키워드 + 접수 동사 (근접 30자 이내) + 로그인 → call_order_agent
-          │    └─ OrderGraph.ainvoke() + interrupt 처리 → 즉시 반환
-          │
-          └─ 그 외 전체 → call_cs_agent 직접 호출
-               └─ cs_executor.run() (LangChain tool calling, CS 도구 10개) → 즉시 반환
+  ├─ 2. (없으면) _is_order_fastpath() 정확 구문 매칭 (Supervisor LLM 생략)
+  │       └─ 취소/교환/반품/환불 + 접수 의도가 결합된 구문 완전 일치 시 → OrderGraph 직행
+  │            예: "취소해줘", "교환 신청", "반품해주세요"
+  │            OrderGraph.ainvoke() + interrupt 처리 → 즉시 반환
+  │
+  └─ 3. (그 외 모든 메시지) Supervisor LLM _run_loop
+          └─ LLM이 call_cs_agent / call_order_agent 도구 선택
+               ├─ call_cs_agent  → cs_executor.run() (LangChain tool calling, CS 도구 10개)
+               └─ call_order_agent → OrderGraph.ainvoke()
 ```
 
-> Supervisor LLM `_run_loop`은 현재 정상 흐름에서 도달하지 않습니다.  
-> fast_route가 모든 요청을 처리하므로 LLM 오케스트레이션 비용이 0입니다.
+> `_is_order_fastpath`는 접수 의도가 명확한 극히 일부 메시지만 처리합니다.  
+> 애매한 표현("취소 정책이 뭐야?", "교환 가능한가요?" 등)은 모두 Supervisor LLM이 판단합니다.
 
 ---
 
-## `_fast_route` 오탐 방지 로직
+## `_is_order_fastpath` 매칭 방식
 
-단순 키워드 매칭은 오탐을 유발합니다.
-
-```
-"취소 정책이 뭐야?" → 취소 키워드 감지 → OrderGraph 잘못 호출
-"원해서 배송지를 바꾸고 싶어" → "원해" 동사 감지 → OrderGraph 잘못 호출
-```
-
-두 가지 방어를 적용합니다.
-
-### 1. 정책 조회 선제 차단
+키워드 분리 대신 **복합 구문 완전 일치**를 사용합니다.
 
 ```python
-_POLICY_INQUIRY_WORDS: frozenset[str] = frozenset({
-    "정책", "규정", "절차", "방법", "어떻게", "뭐야", "뭔가요", "알고 싶",
-    "안내", "알려줘", "설명", "궁금", "가능한가요", "되나요",
+_ORDER_FASTPATH_PATTERNS: frozenset[str] = frozenset({
+    "취소해줘", "취소해주세요", "취소해",
+    "교환해줘", "교환해주세요", "교환해",
+    "반품해줘", "반품해주세요", "반품해",
+    "환불해줘", "환불해주세요", "환불해",
+    "취소 신청", "취소신청",
+    "교환 신청", "교환신청",
+    "반품 신청", "반품신청",
 })
 
-if any(w in q for w in _POLICY_INQUIRY_WORDS):
-    return "cs"   # 정책 안내는 무조건 CS 에이전트
+def _is_order_fastpath(user_message: str) -> bool:
+    msg = user_message.strip().lower()
+    for p in _ORDER_FASTPATH_PATTERNS:
+        pattern = r'(?<![가-힣])' + re.sub(r'\s+', r'\\s*', re.escape(p)) + r'(?![가-힣])'
+        if re.search(pattern, msg):
+            return True
+    return False
 ```
 
-### 2. 키워드-동사 근접 검사
+패턴 앞뒤에 한글 완성형 글자(AC00–D7A3)가 없어야 매칭됩니다 — 부분 단어 오매칭 방지.  
+패턴 내부 공백은 `\s*`로 처리하여 "취소 해줘"처럼 띄어쓴 경우도 매칭됩니다.
 
-```python
-_MAX_KW_VERB_DISTANCE: int = 30   # 문자 기준
+| 입력 | 결과 | 이유 |
+|------|------|------|
+| "이 주문 취소해줘" | True | 패턴 앞 공백·뒤 종료 |
+| "교환 신청" | True | 패턴 정확 일치 |
+| "교환신청서 작성방법" | **False** | 패턴 뒤 한글 '서' 연속 |
+| "취소해줘야 하나요?" | **False** | 패턴 뒤 한글 '야' 연속 |
+| "반품신청방법 알려줘" | **False** | 패턴 뒤 한글 '방' 연속 |
+| "취소 방법 알려줘" | False | 패턴 없음 → LLM 판단 |
 
-for kw in all_order_kws:          # "취소", "교환" 등
-    kw_pos = q.find(kw)
-    if kw_pos == -1:
-        continue
-    for verb in _ORDER_ACTION_VERBS:   # "원해", "할게", "해줘" 등
-        verb_pos = q.find(verb)
-        if verb_pos != -1 and abs(kw_pos - verb_pos) <= _MAX_KW_VERB_DISTANCE:
-            return "order"
-```
-
-키워드와 접수 동사가 30자 이내에 함께 있을 때만 `order`로 라우팅합니다.
+이 패턴에 해당하지 않는 모든 메시지는 Supervisor LLM에 위임됩니다.
 
 ---
 

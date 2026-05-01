@@ -67,10 +67,10 @@ export const TICKET_STATUS_LABEL: Record<TicketStatus, string> = {
 };
 
 export const TICKET_STATUS_COLOR: Record<TicketStatus, string> = {
-  received: 'bg-blue-100 text-blue-700',
-  processing: 'bg-amber-100 text-amber-700',
-  completed: 'bg-green-100 text-green-700',
-  cancelled: 'bg-gray-100 text-gray-500',
+  received:   'bg-emerald-100 text-emerald-700',  // primary
+  processing: 'bg-amber-100 text-amber-700',       // amber — 진행중 범용 관례 유지
+  completed:  'bg-emerald-50 text-emerald-800',    // primary (lighter shade)
+  cancelled:  'bg-stone-100 text-stone-500',        // neutral
 };
 
 export const TICKET_ACTION_LABEL: Record<TicketActionType, string> = {
@@ -79,6 +79,6 @@ export const TICKET_ACTION_LABEL: Record<TicketActionType, string> = {
 };
 
 export const TICKET_ACTION_COLOR: Record<TicketActionType, string> = {
-  cancel: 'bg-red-50 text-red-600',
-  exchange: 'bg-purple-50 text-purple-600',
+  cancel:   'bg-rose-50 text-rose-700',     // tertiary (#BD4E61)
+  exchange: 'bg-emerald-50 text-emerald-700', // primary (#008542)
 };

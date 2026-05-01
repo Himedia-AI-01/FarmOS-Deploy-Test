@@ -8,11 +8,6 @@ import { useNavigate } from 'react-router-dom';
 import DaumPostcode from 'react-daum-postcode';
 import { formatDaumAddress, type DaumPostcodeData } from '@/utils/daumAddress';
 
-const REGIONS = [
-  "서울", "인천", "대전", "대구", "광주", "부산", "울산", "세종",
-  "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주"
-];
-
 const CROPS = [
   "감자", "고추", "들깨", "무", "배추", "벼", "양배추", "오이", "옥수수", "콩", "토마토", "파"
 ];
@@ -473,7 +468,7 @@ export default function DiagnosisPage() {
           isDragActive ? 'border-primary bg-primary/5' : 'border-gray-200 hover:border-primary/40 hover:bg-gray-50/50'
         }`}
       >
-        <input {...getInputProps()} />
+        <input {...customInputProps} />
         <div className="w-20 h-20 bg-primary/10 rounded-full flex items-center justify-center mx-auto mb-4">
           <MdCameraAlt className="text-4xl text-primary" />
         </div>

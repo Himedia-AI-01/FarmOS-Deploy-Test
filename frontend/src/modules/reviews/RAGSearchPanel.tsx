@@ -89,7 +89,7 @@ export default function RAGSearchPanel({ onSearch, results, isSearching }: Props
 
       {results.length > 0 && (
         <div className="space-y-2 max-h-[300px] overflow-y-auto">
-          {results.map((r, i) => (
+          {results.map((r) => (
             <div key={r.id} className="flex items-start gap-3 p-3 rounded-xl bg-gray-50">
               <span className="mt-0.5 text-xs font-mono text-gray-400 w-6 text-right flex-shrink-0">
                 {(r.similarity * 100).toFixed(0)}%

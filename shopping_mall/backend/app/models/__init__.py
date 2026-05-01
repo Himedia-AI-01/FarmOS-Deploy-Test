@@ -17,7 +17,9 @@ from .chat_log import ChatLog
 from .exchange_request import ExchangeRequest
 from .tool_metric import ToolMetric
 from .ticket import ShopTicket
-
+from .faq_doc import FaqDoc
+from .faq_category import FaqCategory
+from .faq_citation import FaqCitation
 __all__ = [
     "Category",
     "Store",
@@ -39,4 +41,7 @@ __all__ = [
     "ExchangeRequest",
     "ToolMetric",
     "ShopTicket",
+    "FaqDoc",
+    "FaqCategory",
+    "FaqCitation",
 ]

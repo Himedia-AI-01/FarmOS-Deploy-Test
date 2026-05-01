@@ -202,25 +202,48 @@ if session_id and await self._has_pending_order_flow(session_id):
 
 ---
 
+## 주문 상태(status) 전체 목록
+
+`shop_orders.status` 컬럼에 저장되는 값과 의미입니다.
+
+| status | 한국어 표시 | 전환 방식 | 취소 | 교환/반품 |
+|---|---|---|---|:---:|
+| `pending` | 주문 접수 | 주문 생성 기본값 | 즉시 자동 | ✗ |
+| `preparing` | 상품 준비 중 | admin 수동 | 즉시 자동 | ✗ |
+| `shipped` | 배송 중 | Shipment 생성 시 자동 | 관리자 검토 | ✗ |
+| `delivered` | 배송 완료 | Shipment.status=delivered 시 자동 | 불가 | ✅ |
+| `cancelled` | 취소 완료 | 자동/관리자 | 불가 | ✗ |
+| `returned` | 반품 완료 | 교환/취소 티켓 completed 시 자동 | 불가 | ✗ |
+
+> 비표준 값(`registered`, `picked_up`, `in_transit`, `shipping`, `paid` 등)은 인식되지 않습니다.  
+> 테스트 데이터 삽입 시에도 위 목록 중 하나를 사용해야 합니다.  
+> 기존 데이터 변환: `uv run python scripts/migrate_order_status.py --dry-run`
+
+### 상태 전환 흐름
+
+```text
+pending ──(admin)──→ preparing ──(Shipment 생성)──→ shipped ──(admin 배송완료 처리)──→ delivered
+   │                    │               │                                                   │
+   │                    │               │                                                   │
+(자동취소)           (자동취소)      (관리자취소)                                        (교환/취소 티켓 completed)
+   │                    │               │                                                   │
+   └────────────────────┴───────────────┘                                               returned
+                        ↓
+                    cancelled
+```
+
+Shipment.status는 별도: `registered → picked_up → in_transit → delivered`
+
 ## 주문 상태 필터
 
 취소/교환 가능 여부를 제한하는 상수가 `nodes.py`에 정의됩니다.
 
 ```python
-CANCELLABLE_STATUSES: frozenset[str] = frozenset({"pending", "registered"})
-# 취소: 배송사 픽업 전(결제 완료·배송 준비 중) 단계만
+CANCELLABLE_STATUSES: frozenset[str] = frozenset({"pending", "preparing"})
+# 취소: 배송사 픽업 전(주문 접수·상품 준비 중) 단계만
 
 EXCHANGEABLE_STATUSES: frozenset[str] = frozenset({"delivered"})
 # 교환: 배송 완료된 주문만
-
-_STATUS_DISPLAY: dict[str, str] = {
-    "pending":    "결제 완료 (배송 준비 전)",
-    "registered": "배송 준비 중",
-    "picked_up":  "배송 중 (픽업 완료)",
-    "in_transit": "배송 중",
-    "delivered":  "배송 완료",
-    "cancelled":  "취소 완료",
-}
 ```
 
 `list_orders` 노드는 `action`에 따라 해당 상수로 필터링합니다.  

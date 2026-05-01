@@ -58,14 +58,10 @@ def main():
     gc.collect()
 
     import chromadb
-    from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
-    from app.core.config import settings
+    from ai.embeddings import get_embedding_function
 
     client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    embed_fn = OllamaEmbeddingFunction(
-        url=f"{settings.ollama_base_url}/api/embeddings",
-        model_name=settings.ollama_embed_model,
-    )
+    embed_fn = get_embedding_function()
 
     # ── 2단계: 청크 수 확인 ─────────────────────────────────────────
     print()
@@ -86,7 +82,6 @@ def main():
     print()
     print(SEP)
     print("  [3단계] 샘플 쿼리 검색 테스트")
-    print("  (Ollama embeddinggemma:latest 사용 - Ollama 실행 중이어야 합니다)")
     print(SEP)
     all_pass = True
 

@@ -1,10 +1,13 @@
 """관리자 전용 라우터 — 티켓·챗봇 로그·배송 운영 데이터."""
+import logging
 from typing import List, Optional
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -127,7 +130,36 @@ def list_tickets(
     if user_id is not None:
         q = q.filter(ShopTicket.user_id == user_id)
     tickets = q.order_by(desc(ShopTicket.created_at)).offset(offset).limit(limit).all()
-    return [_enrich_ticket(t, db) for t in tickets]
+    if not tickets:
+        return []
+
+    # User / Order 일괄 조회 — 티켓 N건에 대해 각각 1회 IN 쿼리
+    user_ids = list({t.user_id for t in tickets})
+    order_ids = list({t.order_id for t in tickets})
+    users_map: dict[int, User] = {
+        u.id: u for u in db.query(User).filter(User.id.in_(user_ids)).all()
+    }
+    orders_map: dict[int, Order] = {
+        o.id: o for o in db.query(Order).filter(Order.id.in_(order_ids)).all()
+    }
+
+    return [
+        TicketResponse(
+            id=t.id,
+            user_id=t.user_id,
+            session_id=t.session_id,
+            order_id=t.order_id,
+            action_type=t.action_type,
+            reason=t.reason,
+            refund_method=t.refund_method,
+            items=t.items,
+            status=t.status,
+            created_at=t.created_at,
+            user_name=users_map[t.user_id].name if t.user_id in users_map else None,
+            order_total=orders_map[t.order_id].total_price if t.order_id in orders_map else None,
+        )
+        for t in tickets
+    ]
 
 
 @router.get("/tickets/stats")
@@ -183,9 +215,76 @@ def update_ticket_status(
             detail=f"'{t.status}' → '{body.status}' 전환은 허용되지 않습니다. 허용된 전환: {allowed_str}",
         )
     t.status = body.status
+
+    # 교환/취소 티켓이 completed로 전환될 때 delivered 주문 → returned 자동 처리
+    if body.status == "completed" and t.action_type in ("cancel", "exchange"):
+        from app.services.order_processor import OrderProcessor
+        order = db.query(Order).filter(Order.id == t.order_id).first()
+        if order and order.status == "delivered":
+            try:
+                OrderProcessor.apply_return(db, order)
+            except ValueError as e:
+                logger.warning(
+                    "[admin] apply_return 실패 — order_id=%s: %s", order.id, e
+                )
+
     db.commit()
     db.refresh(t)
     return _enrich_ticket(t, db)
+
+
+# ── 주문 상태 수동 전환 ──────────────────────────────────────────────────────
+
+
+class AdminOrderStatusUpdate(BaseModel):
+    status: str  # "preparing" | "cancelled"
+
+
+# 관리자 허용 전환 — 자동 전환이 없는 단계만 수동으로 처리
+_ADMIN_ORDER_TRANSITIONS: dict[str, list[str]] = {
+    "pending":   ["preparing", "cancelled"],
+    "preparing": ["cancelled"],
+    "shipped":   ["cancelled"],  # 강제 취소 (배송 중 관리자 처리)
+    "delivered": [],
+    "cancelled": [],
+    "returned":  [],
+}
+
+
+@router.patch("/orders/{order_id}/status")
+def admin_update_order_status(
+    order_id: int,
+    body: AdminOrderStatusUpdate,
+    db: Session = Depends(get_db),
+):
+    """관리자 수동 주문 상태 전환.
+
+    허용 전환:
+      pending   → preparing  (상품 준비 시작 확인)
+      pending   → cancelled  (관리자 직접 취소)
+      preparing → cancelled  (관리자 직접 취소)
+      shipped   → cancelled  (강제 취소 — 배송 중 예외 처리)
+    """
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
+
+    allowed = _ADMIN_ORDER_TRANSITIONS.get(order.status, [])
+    if body.status not in allowed:
+        allowed_str = ", ".join(allowed) if allowed else "없음 (전환 불가 상태)"
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{order.status}' → '{body.status}' 전환은 허용되지 않습니다. 허용된 전환: {allowed_str}",
+        )
+
+    # pending / preparing 취소 시 재고 복구
+    if body.status == "cancelled" and order.status in ("pending", "preparing"):
+        from app.services.order_processor import OrderProcessor
+        OrderProcessor.restore_stock(db, order.id)
+
+    order.status = body.status
+    db.commit()
+    return {"order_id": order_id, "status": order.status}
 
 
 # ── 배송 엔드포인트 ──────────────────────────────────────────────────────────
@@ -272,7 +371,83 @@ def admin_list_shipments(
     if status:
         q = q.filter(Shipment.status == status)
     shipments = q.order_by(desc(Shipment.created_at)).offset(offset).limit(limit).all()
-    return [_enrich_shipment(s, db) for s in shipments]
+
+    if not shipments:
+        return []
+
+    # Order / ShopTicket 일괄 조회 — 배송 N건에 대해 각각 1회씩
+    order_ids = list({s.order_id for s in shipments})
+    orders_map: dict[int, Order] = {
+        o.id: o for o in db.query(Order).filter(Order.id.in_(order_ids)).all()
+    }
+
+    explicit_ticket_ids = [s.related_ticket_id for s in shipments if s.related_ticket_id is not None]
+    explicit_tickets_map: dict[int, ShopTicket] = {}
+    if explicit_ticket_ids:
+        explicit_tickets_map = {
+            t.id: t for t in db.query(ShopTicket).filter(ShopTicket.id.in_(explicit_ticket_ids)).all()
+        }
+
+    # related_ticket_id가 없는 배송은 order_id 기준 최신 exchange 티켓 조회 (1회 IN 쿼리)
+    implicit_order_ids = [s.order_id for s in shipments if s.related_ticket_id is None]
+    implicit_tickets_map: dict[int, ShopTicket] = {}
+    if implicit_order_ids:
+        # 각 order_id당 가장 최근 exchange 티켓 — row_number로 선택
+        inner = (
+            db.query(
+                ShopTicket,
+                func.row_number().over(
+                    partition_by=ShopTicket.order_id,
+                    order_by=desc(ShopTicket.created_at),
+                ).label("rn"),
+            )
+            .filter(
+                ShopTicket.order_id.in_(implicit_order_ids),
+                ShopTicket.action_type == "exchange",
+            )
+            .subquery()
+        )
+        from sqlalchemy.orm import aliased
+        TicketAlias = aliased(ShopTicket, inner)
+        implicit_tickets_map = {
+            t.order_id: t
+            for t in db.query(TicketAlias).filter(inner.c.rn == 1).all()
+        }
+
+    results = []
+    for s in shipments:
+        if s.related_ticket_id is not None:
+            ticket = explicit_tickets_map.get(s.related_ticket_id)
+        else:
+            ticket = implicit_tickets_map.get(s.order_id)
+
+        order = orders_map.get(s.order_id)
+        related = (
+            RelatedTicketSummary(
+                id=ticket.id,
+                action_type=ticket.action_type,
+                status=ticket.status,
+                reason=ticket.reason,
+            )
+            if ticket
+            else None
+        )
+        results.append(AdminShipmentResponse(
+            id=s.id,
+            order_id=s.order_id,
+            carrier=s.carrier,
+            tracking_number=s.tracking_number,
+            status=s.status,
+            expected_arrival=s.expected_arrival,
+            last_checked_at=s.last_checked_at,
+            delivered_at=s.delivered_at,
+            tracking_history=s.tracking_history,
+            created_at=s.created_at,
+            order_total=order.total_price if order else None,
+            related_ticket_id=s.related_ticket_id,
+            related_ticket=related,
+        ))
+    return results
 
 
 @router.post("/shipments/{shipment_id}/check", response_model=AdminShipmentResponse)
@@ -281,7 +456,7 @@ def admin_check_shipment(shipment_id: int, db: Session = Depends(get_db)):
     s = db.query(Shipment).filter(Shipment.id == shipment_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="배송을 찾을 수 없습니다.")
-    ShippingTracker.update_shipment(s)
+    ShippingTracker.update_shipment(s, db=db)
     db.commit()
     db.refresh(s)
     return _enrich_shipment(s, db)
@@ -349,50 +524,74 @@ def admin_list_chat_sessions(
         .all()
     )
 
+    if not sessions:
+        return []
+
+    session_ids = [s.id for s in sessions]
+
+    # ── 집계 1: log_count + has_escalation (ChatLog 1회 IN 쿼리) ──────────────
+    from sqlalchemy import case
+    agg_rows = (
+        db.query(
+            ChatLog.session_id,
+            func.count(ChatLog.id).label("log_count"),
+            func.max(case((ChatLog.escalated == True, 1), else_=0)).label("has_esc"),
+        )
+        .filter(ChatLog.session_id.in_(session_ids))
+        .group_by(ChatLog.session_id)
+        .all()
+    )
+    log_count_map: dict[int, int] = {r.session_id: r.log_count for r in agg_rows}
+    has_esc_map: dict[int, bool] = {r.session_id: bool(r.has_esc) for r in agg_rows}
+
+    # ── 집계 2: 세션별 마지막 로그 (row_number 서브쿼리 1회) ───────────────────
+    last_log_inner = (
+        db.query(
+            ChatLog.session_id,
+            ChatLog.question,
+            ChatLog.created_at,
+            func.row_number().over(
+                partition_by=ChatLog.session_id,
+                order_by=desc(ChatLog.created_at),
+            ).label("rn"),
+        )
+        .filter(ChatLog.session_id.in_(session_ids))
+        .subquery()
+    )
+    last_log_rows = db.query(last_log_inner).filter(last_log_inner.c.rn == 1).all()
+    last_question_map: dict[int, Optional[str]] = {r.session_id: r.question for r in last_log_rows}
+    last_at_map: dict[int, Optional[datetime]] = {r.session_id: r.created_at for r in last_log_rows}
+
+    # ── 집계 3: 세션별 pending 티켓 상태 (ShopTicket 1회 IN 쿼리) ─────────────
+    ticket_rows = (
+        db.query(ShopTicket.session_id, ShopTicket.status)
+        .filter(
+            ShopTicket.session_id.in_(session_ids),
+            ShopTicket.status.in_(["received", "processing"]),
+        )
+        .all()
+    )
+    ticket_status_map: dict[int, set] = {}
+    for row in ticket_rows:
+        ticket_status_map.setdefault(row.session_id, set()).add(row.status)
+
     result = []
     for s in sessions:
-        last_log = (
-            db.query(ChatLog)
-            .filter(ChatLog.session_id == s.id)
-            .order_by(desc(ChatLog.created_at))
-            .first()
-        )
-        log_count = (
-            db.query(ChatLog)
-            .filter(ChatLog.session_id == s.id)
-            .count()
-        )
-        # escalated_only=True 이면 JOIN 필터로 이미 보장 → 추가 쿼리 불필요
-        has_escalation = escalated_only or (
-            db.query(ChatLog)
-            .filter(ChatLog.session_id == s.id, ChatLog.escalated.is_(True))
-            .first()
-        ) is not None
-
-        # 이 세션에서 생성된 미처리 티켓 중 가장 심각한 상태 계산
-        # received > processing (received가 더 긴급)
-        session_tickets = (
-            db.query(ShopTicket.status)
-            .filter(
-                ShopTicket.session_id == s.id,
-                ShopTicket.status.in_(["received", "processing"]),
-            )
-            .all()
-        )
+        sid = s.id
+        statuses = ticket_status_map.get(sid, set())
         pending_ticket_status: Optional[str] = None
-        if session_tickets:
-            statuses = {row.status for row in session_tickets}
-            pending_ticket_status = "received" if "received" in statuses else "processing"
+        if statuses:
+            pending_ticket_status = "processing" if "processing" in statuses else "received"
 
         result.append(AdminChatSessionResponse(
-            id=s.id,
+            id=sid,
             user_id=s.user_id,
             title=s.title,
             status=s.status,
-            log_count=log_count,
-            last_question=last_log.question if last_log else None,
-            last_message_at=last_log.created_at if last_log else None,
-            has_escalation=has_escalation,
+            log_count=log_count_map.get(sid, 0),
+            last_question=last_question_map.get(sid),
+            last_message_at=last_at_map.get(sid),
+            has_escalation=escalated_only or has_esc_map.get(sid, False),
             pending_ticket_status=pending_ticket_status,
             created_at=s.created_at,
             updated_at=s.updated_at,

@@ -1,6 +1,8 @@
 """AI-powered weekly report generation service."""
 import logging
 from datetime import datetime
+
+from app.core.datetime_utils import now_kst
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -55,7 +57,7 @@ class ReportService:
             .filter(
                 Order.created_at >= datetime.strptime(week_start, "%Y-%m-%d"),
                 Order.created_at <= datetime.strptime(week_end, "%Y-%m-%d"),
-                Order.status != "cancelled",
+                Order.status.notin_(["cancelled", "returned"]),
             )
             .group_by(Product.id)
             .order_by(func.sum(OrderItem.quantity).desc())
@@ -70,7 +72,7 @@ class ReportService:
             .filter(
                 Order.created_at >= datetime.strptime(week_start, "%Y-%m-%d"),
                 Order.created_at <= datetime.strptime(week_end, "%Y-%m-%d"),
-                Order.status != "cancelled",
+                Order.status.notin_(["cancelled", "returned"]),
             )
             .scalar()
         ) or 0
@@ -94,7 +96,7 @@ class ReportService:
             total_expense=total_expense,
             net_profit=net_profit,
             report_content=report_content,
-            generated_at=datetime.utcnow(),
+            generated_at=now_kst(),
         )
         db.add(report)
         db.commit()

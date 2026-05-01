@@ -12,7 +12,7 @@ type AgentStatus = 'online' | 'away' | 'busy' | 'offline';
 const AGENT_STATUS_CONFIG: Record<AgentStatus, { label: string; dot: string; desc: string }> = {
   online:  { label: '온라인',    dot: 'bg-emerald-500', desc: '상담 가능' },
   away:    { label: '자리비움',  dot: 'bg-amber-400',   desc: '잠시 자리를 비웠습니다' },
-  busy:    { label: '바쁨',      dot: 'bg-red-500',     desc: '상담 불가 (처리 중)' },
+  busy:    { label: '바쁨',      dot: 'bg-rose-500',    desc: '상담 불가 (처리 중)' },
   offline: { label: '오프라인',  dot: 'bg-stone-400',   desc: '오프라인 상태' },
 };
 
@@ -66,7 +66,7 @@ function SidebarSection({ title, items }: SidebarSectionProps) {
             <span className="text-sm tracking-tight">{item.label}</span>
           </div>
           {item.badge != null && item.badge > 0 && (
-            <span className="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-bold min-w-[20px] text-center">
+            <span className="text-[10px] bg-rose-100 text-rose-600 px-1.5 py-0.5 rounded-full font-bold min-w-[20px] text-center">
               {item.badge > 99 ? '99+' : item.badge}
             </span>
           )}
@@ -84,6 +84,11 @@ export default function AdminLayout() {
   const { user, isLoggedIn, checkAuth } = useUserStore();
   const { data: escalated = [] } = useEscalatedLogs();
   const { data: ticketStats } = useDashboardTicketStats();
+
+  // 에스컬레이션된 고유 세션 수 — 로그 건수가 아닌 세션 단위로 집계
+  const escalatedSessionCount = new Set(
+    escalated.map((l) => l.session_id).filter((id): id is number => id != null)
+  ).size;
   const [searchQuery, setSearchQuery] = useState('');
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('online');
   const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
@@ -131,9 +136,10 @@ export default function AdminLayout() {
       to: '/admin/chatbot',
       label: '챗봇 대화',
       icon: 'chat',
-      badge: escalated.length,
+      badge: escalatedSessionCount,
     },
     { to: '/admin/cs-insights', label: 'CS 인사이트', icon: 'lightbulb' },
+    { to: '/admin/faq', label: 'FAQ 관리', icon: 'menu_book' },
     { to: '/admin/shipments', label: '배송 관리', icon: 'local_shipping' },
     { to: '/admin/analytics', label: '분석', icon: 'bar_chart' },
   ];
@@ -145,7 +151,7 @@ export default function AdminLayout() {
   ];
 
   // ── Notification count: escalated + pending ──
-  const totalAlerts = escalated.length + pendingTickets;
+  const totalAlerts = escalatedSessionCount + pendingTickets;
 
   return (
     <div className="flex min-h-screen bg-stone-50">
@@ -274,7 +280,7 @@ export default function AdminLayout() {
               </span>
               {totalAlerts > 0 && (
                 <span
-                  className="absolute top-2 right-2 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white"
+                  className="absolute top-2 right-2 w-2 h-2 bg-rose-500 rounded-full ring-2 ring-white"
                   aria-hidden="true"
                 />
               )}

@@ -134,7 +134,8 @@ async def run(executor, db, question, user_id=None, history=None):
 def get_tool(rag, db, user_id, tool_name):
     """build_cs_tools 팩토리에서 특정 도구를 꺼내는 헬퍼."""
     from ai.agent.cs_tools import build_cs_tools
-    return {t.name: t for t in build_cs_tools(rag, db, user_id)}[tool_name]
+    tools, _ctx = build_cs_tools(rag, db, user_id)
+    return {t.name: t for t in tools}[tool_name]
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -174,11 +175,11 @@ class TestNormalCases:
 
     async def test_multi_tool_single_pass(self, empty_db):
         """두 개 도구를 한 번에 선택 후 최종 답변 — LLM 2회 호출."""
-        rag = FakeRAGService({"storage_guide": ["딸기는 냉장 보관하세요."]})
+        rag = FakeRAGService({"faq": ["딸기는 냉장 보관하세요."]})
         llm = FakeLLM([
             make_tool_call_message(
                 ("search_products", {"query": "딸기"}),
-                ("search_storage_guide", {"product_name": "딸기", "query": "딸기 보관법"}),
+                ("search_faq", {"query": "딸기 보관법", "subcategory": "storage"}),
             ),
             make_text_message("딸기는 150개 재고가 있으며, 냉장 보관하시면 됩니다."),
         ])
@@ -186,7 +187,7 @@ class TestNormalCases:
 
         result = await run(executor, empty_db, "딸기 재고랑 보관법 알려줘")
 
-        assert set(result.tools_used) == {"search_products", "search_storage_guide"}
+        assert set(result.tools_used) == {"search_products", "search_faq"}
         assert result.intent == "stock"  # 첫 번째 도구 기준
         assert result.escalated is False
         assert len(llm.calls) == 2
@@ -227,7 +228,7 @@ class TestNormalCases:
 
     async def test_get_order_status_logged_in(self):
         """로그인 사용자의 주문/배송 조회."""
-        order = make_order(order_id=100, user_id=10, status="shipping")
+        order = make_order(order_id=100, user_id=10, status="shipped")
         shipment = make_shipment(order_id=100, carrier="CJ대한통운", tracking_number="9999")
         db = make_mock_db(orders=[order], shipments=[shipment])
 
@@ -351,7 +352,7 @@ class TestDirectToolInvocation:
 
     async def test_get_order_status_returns_tracking(self):
         """get_order_status — 송장번호·택배사 포함 결과 반환."""
-        order = make_order(order_id=55, user_id=7, status="shipping")
+        order = make_order(order_id=55, user_id=7, status="shipped")
         shipment = make_shipment(tracking_number="TRK-001", carrier="한진택배")
         db = make_mock_db(orders=[order], shipments=[shipment])
         tool = get_tool(FakeRAGService(), db, user_id=7, tool_name="get_order_status")
@@ -458,23 +459,24 @@ class TestDirectToolInvocation:
 
     async def test_empty_rag_returns_fallback_message(self, empty_db):
         """RAG에 관련 문서 없을 때 폴백 텍스트 반환."""
-        tool = get_tool(FakeRAGService(), empty_db, user_id=None, tool_name="search_storage_guide")
+        tool = get_tool(FakeRAGService(), empty_db, user_id=None, tool_name="search_faq")
 
-        raw = await tool.ainvoke({"product_name": "희귀버섯", "query": "보관법"})
+        raw = await tool.ainvoke({"query": "희귀버섯 보관법", "subcategory": "storage"})
 
         assert "찾을 수 없" in raw or "없습니다" in raw
 
     async def test_known_tools_set(self, empty_db):
-        """build_cs_tools가 정의된 10개 도구를 정확히 반환하는지 확인."""
+        """build_cs_tools가 정의된 9개 도구를 정확히 반환하는지 확인."""
         from ai.agent.cs_tools import build_cs_tools
-        tools = build_cs_tools(FakeRAGService(), empty_db, user_id=None)
+        tools, _ctx = build_cs_tools(FakeRAGService(), empty_db, user_id=None)
         tool_names = {t.name for t in tools}
 
         expected = {
-            "search_faq", "search_storage_guide", "search_season_info",
-            "search_policy", "search_farm_info",
+            "search_faq",
+            "search_policy",
             "get_order_status", "search_products", "get_product_detail",
             "escalate_to_agent", "refuse_request",
+            "cancel_order", "process_refund",
         }
         assert tool_names == expected
 
@@ -562,15 +564,14 @@ class TestGetProductDetail:
 class TestIntentMapping:
 
     @pytest.mark.parametrize("tool_name,args,expected_intent", [
-        ("get_order_status",    {"order_id": None},                              "delivery"),
-        ("search_products",     {"query": "test"},                               "stock"),
-        ("get_product_detail",  {"product_name": "딸기"},                         "stock"),
-        ("search_storage_guide",{"product_name": "딸기", "query": "보관법"},       "storage"),
-        ("search_season_info",  {"query": "test"},                               "season"),
-        ("search_policy",       {"query": "test"},                               "policy"),
-        ("search_faq",          {"query": "test"},                               "other"),
-        ("search_farm_info",    {"query": "test"},                               "other"),
-        ("escalate_to_agent",   {"reason": "고객 요청"},                           "escalation"),
+        ("get_order_status",   {"order_id": None},                               "delivery"),
+        ("search_products",    {"query": "test"},                                "stock"),
+        ("get_product_detail", {"product_name": "딸기"},                          "stock"),
+        ("search_policy",      {"query": "test"},                                "policy"),
+        ("search_faq",         {"query": "test"},                                "faq"),
+        ("escalate_to_agent",  {"reason": "고객 요청"},                            "escalation"),
+        ("cancel_order",       {"order_id": 1, "reason": "변심"},                 "cancel"),
+        ("process_refund",     {"order_id": 1, "refund_method": "원결제 수단"},    "cancel"),
     ])
     async def test_intent_from_tool(self, tool_name, args, expected_intent, empty_db):
         """각 도구 호출 시 올바른 intent가 AgentResult에 역산되는지 검증."""
@@ -668,11 +669,11 @@ class TestToolMetrics:
 
     async def test_multi_tool_metrics_same_iteration(self, empty_db):
         """단일 패스에서 복수 도구 호출 시 모든 메트릭의 iteration=1."""
-        rag = FakeRAGService({"storage_guide": ["냉장 보관하세요."]})
+        rag = FakeRAGService({"faq": ["냉장 보관하세요."]})
         llm = FakeLLM([
             make_tool_call_message(
                 ("search_products", {"query": "딸기"}),
-                ("search_storage_guide", {"product_name": "딸기", "query": "보관법"}),
+                ("search_faq", {"query": "딸기 보관법", "subcategory": "storage"}),
             ),
             make_text_message("딸기 재고와 보관법 안내입니다."),
         ])

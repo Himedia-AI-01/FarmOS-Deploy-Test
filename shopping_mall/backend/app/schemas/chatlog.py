@@ -38,6 +38,9 @@ class ChatAnswer(BaseModel):
     intent: str
     escalated: bool = False
     trace: Optional[List[TraceStepSchema]] = None  # debug=true 시에만 포함
+    # FAQ 피드백 수집에 필요한 필드
+    chat_log_id: Optional[int] = None            # 피드백 제출 시 참조 ID
+    cited_faq_ids: List[int] = Field(default_factory=list)  # 인용된 FAQ 문서 DB ID 목록
 
 
 class ChatLogResponse(BaseModel):

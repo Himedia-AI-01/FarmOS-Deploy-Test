@@ -1,16 +1,25 @@
 """영농일지 API 라우터."""
 
+import logging
 from datetime import date
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.core import journal_store
+from app.core.exif_utils import extract_exif
 from app.core.journal_parser import parse_stt_text
+from app.core.journal_vision_parser import parse_photos as parse_photos_internal
 from app.core.pesticide_candidates import build_whisper_prompt
+from app.core.photo_storage import absolute_path, delete_photo_files, save_photo
 from app.core.stt import transcribe_audio
+from app.models.journal import JournalEntryPhoto
 from app.models.user import User
 from app.schemas.journal import (
     JournalEntryCreate,
@@ -21,6 +30,8 @@ from app.schemas.journal import (
     STTParseResponse,
     DailySummaryResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/journal", tags=["journal"])
 
@@ -103,6 +114,215 @@ async def parse_stt(
     except Exception:
         pass  # 매칭 실패해도 파싱 결과는 정상 반환
     return result
+
+
+@router.post("/parse-photos")
+async def parse_photos(
+    files: list[UploadFile] = File(...),
+    field_name: str | None = Form(default=None),
+    crop: str | None = Form(default=None),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """사진 1~N장을 Vision LLM으로 분석해 영농일지 entry 배열을 prefill 반환.
+
+    `/parse-stt`와 동일한 entry shape `{entries: [{parsed, confidence}]}` 을 반환한다.
+    동시에 모든 사진을 디스크에 저장하고 photo_ids 를 응답에 포함하여, 사용자가 폼에서
+    저장 시 entry 와 연결할 수 있게 한다 (entry_id=null 임시 사진은 24h 후 cleanup).
+    """
+    if not files:
+        raise HTTPException(400, "사진 1장 이상 업로드해주세요.")
+    if len(files) > settings.JOURNAL_VISION_MAX_IMAGES:
+        raise HTTPException(
+            400,
+            f"최대 {settings.JOURNAL_VISION_MAX_IMAGES}장까지 업로드 가능합니다.",
+        )
+
+    images: list[bytes] = []
+    exif_hints = []
+    for f in files:
+        if not (f.content_type or "").startswith("image/"):
+            raise HTTPException(400, f"이미지 파일만 업로드 가능합니다: {f.filename}")
+        data = await f.read()
+        if not data:
+            raise HTTPException(400, f"빈 이미지 파일: {f.filename}")
+        if len(data) > settings.JOURNAL_VISION_MAX_BYTES:
+            limit_mb = settings.JOURNAL_VISION_MAX_BYTES // (1024 * 1024)
+            raise HTTPException(413, f"사진 크기는 {limit_mb}MB 이하여야 합니다.")
+        images.append(data)
+        exif_hints.append(extract_exif(data))
+
+    try:
+        result = await parse_photos_internal(
+            images=images,
+            exif_hints=exif_hints,
+            field_name=field_name,
+            crop=crop,
+            db=db,
+        )
+    except httpx.TimeoutException:
+        # 알려진 흐름 — implicit traceback 은 디버깅 가치 낮아 차단.
+        raise HTTPException(504, "Vision 분석 시간이 초과되었습니다.") from None
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 원본 traceback 보존 — 서버 로그에서 진짜 원인 추적용.
+        raise HTTPException(
+            502, f"Vision 분석 실패: {type(e).__name__}: {e}"
+        ) from e
+
+    # 농약 매칭 후처리 (STT 경로와 동일)
+    try:
+        from app.core.pesticide_matcher import enrich_with_pesticide_match
+
+        enriched_entries = []
+        for entry in result.get("entries", []):
+            try:
+                enriched_entries.append(await enrich_with_pesticide_match(db, entry))
+            except Exception as match_err:
+                # 단일 entry 매칭 실패는 일상 흐름(미매칭 농약 등) — debug 레벨로 noise 회피.
+                logger.debug(
+                    "journal.parse_photos.pesticide_match_skipped err=%s", match_err
+                )
+                enriched_entries.append(entry)
+        result["entries"] = enriched_entries
+    except Exception as exc:
+        # 모듈 로드 자체 실패 — 환경/배포 이슈일 수 있어 운영자가 인지하도록 warning.
+        logger.warning(
+            "journal.parse_photos.pesticide_matcher_unavailable err=%s", exc
+        )
+
+    # 사진 디스크 저장 + DB 행 생성 (entry_id=null 임시 사진)
+    # strict=True: images/files 는 위에서 1:1 로 만들어졌으므로 항상 동일 길이 — 깨지면 즉시 실패.
+    # DB flush/commit 실패 시 이미 디스크에 저장된 파일들이 영구 누수되지 않도록 경로를 추적.
+    saved_disk_paths: list[tuple[str | None, str | None]] = []
+    saved_ids: list[int] = []
+    try:
+        for img_bytes, f in zip(images, files, strict=True):
+            try:
+                meta = save_photo(current_user.id, img_bytes)
+            except Exception as save_err:
+                # 한 장 실패해도 나머지는 진행. silent 가 아니라 운영자가 인지하도록 warning.
+                logger.warning(
+                    "journal.parse_photos.save_photo_failed file=%s err=%s",
+                    f.filename, save_err,
+                )
+                continue
+            # 이 시점부터 디스크 파일이 존재 — DB 단계 실패 시 정리 대상에 포함.
+            saved_disk_paths.append((meta["file_path"], meta["thumb_path"]))
+            photo = JournalEntryPhoto(
+                user_id=current_user.id,
+                original_filename=f.filename,
+                **meta,
+            )
+            db.add(photo)
+            await db.flush()
+            saved_ids.append(photo.id)
+        if saved_ids:
+            await db.commit()
+    except Exception:
+        # DB flush/commit 실패 — transaction rollback 후 디스크 파일 일괄 정리
+        # (DB 에 row 가 없으니 24h orphan cleanup 으로도 회수 불가능한 영구 누수 차단).
+        await db.rollback()
+        for fp, tp in saved_disk_paths:
+            delete_photo_files(fp, tp)
+        logger.exception("journal.parse_photos.db_persist_failed")
+        raise
+
+    result["image_count"] = len(images)
+    result["photo_ids"] = saved_ids
+    return result
+
+
+# ── 사진 첨부 endpoints ──────────────────────────────────────────────────
+
+
+@router.post("/photos")
+async def upload_photo(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """분석 없이 사진만 업로드 — 폼의 "사진 추가" 버튼용. 응답으로 photo_id 반환."""
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(400, "이미지 파일만 업로드 가능합니다.")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "빈 이미지 파일입니다.")
+    if len(data) > settings.JOURNAL_VISION_MAX_BYTES:
+        limit_mb = settings.JOURNAL_VISION_MAX_BYTES // (1024 * 1024)
+        raise HTTPException(413, f"사진 크기는 {limit_mb}MB 이하여야 합니다.")
+
+    try:
+        meta = save_photo(current_user.id, data)
+    except Exception as e:
+        raise HTTPException(
+            502, f"사진 저장 실패: {type(e).__name__}: {e}"
+        ) from e
+
+    photo = JournalEntryPhoto(
+        user_id=current_user.id,
+        original_filename=file.filename,
+        **meta,
+    )
+    db.add(photo)
+    await db.commit()
+    await db.refresh(photo)
+    return {
+        "photo_id": photo.id,
+        "width": photo.width,
+        "height": photo.height,
+        "size_bytes": photo.size_bytes,
+    }
+
+
+@router.get("/photos/{photo_id}")
+async def download_photo(
+    photo_id: int,
+    thumb: int = Query(default=0),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """사진 다운로드. owner 만 접근 가능 (다른 사용자엔 404)."""
+    photo = (
+        await db.execute(
+            select(JournalEntryPhoto).where(JournalEntryPhoto.id == photo_id)
+        )
+    ).scalar_one_or_none()
+    if not photo or photo.user_id != current_user.id:
+        # 권한 없음/존재 X 모두 404 (정보 노출 회피)
+        raise HTTPException(404, "사진을 찾을 수 없습니다.")
+
+    rel = photo.thumb_path if thumb and photo.thumb_path else photo.file_path
+    abs_path = absolute_path(rel)
+    if not abs_path.exists():
+        raise HTTPException(404, "사진 파일이 디스크에 없습니다.")
+    return FileResponse(abs_path, media_type=photo.mime_type or "image/jpeg")
+
+
+@router.delete("/photos/{photo_id}", status_code=204)
+async def delete_photo(
+    photo_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """사진 명시적 삭제 (× 버튼). owner 만 가능."""
+    photo = (
+        await db.execute(
+            select(JournalEntryPhoto).where(JournalEntryPhoto.id == photo_id)
+        )
+    ).scalar_one_or_none()
+    if not photo or photo.user_id != current_user.id:
+        raise HTTPException(404, "사진을 찾을 수 없습니다.")
+    # commit 전에 unlink 하면 commit 실패 시 DB row 는 살아있는데 디스크 파일만 사라져
+    # 이후 다운로드가 깨짐. 경로만 보관하고 commit 성공 후 unlink (journal_store 의
+    # update_entry/delete_entry/cleanup_orphans 와 동일 패턴).
+    file_path = photo.file_path
+    thumb_path = photo.thumb_path
+    await db.delete(photo)
+    await db.commit()
+    delete_photo_files(file_path, thumb_path)
+    return None
 
 
 @router.get("/daily-summary", response_model=DailySummaryResponse)

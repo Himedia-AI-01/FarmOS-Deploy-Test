@@ -383,8 +383,8 @@ class AiAgentBridge:
                  jsonb_build_object(CAST(:src AS text), 1),
                  jsonb_build_object(CAST(:pr AS text), 1),
                  :dur,
-                 CASE WHEN :dur IS NULL THEN 0 ELSE 1 END,
-                 CASE WHEN :dur IS NULL THEN 0 ELSE :dur END,
+                 COALESCE(CASE WHEN :dur IS NULL THEN 0 ELSE 1 END, 0),
+                 COALESCE(CASE WHEN :dur IS NULL THEN 0 ELSE :dur END, 0),
                  :last_at, now())
             ON CONFLICT (day, control_type) DO UPDATE SET
                 count = ai_agent_activity_daily.count + 1,
@@ -398,23 +398,23 @@ class AiAgentBridge:
                     ARRAY[CAST(:pr AS text)],
                     to_jsonb(COALESCE((ai_agent_activity_daily.by_priority->>:pr)::int, 0) + 1)
                 ),
-                duration_count = ai_agent_activity_daily.duration_count
+                duration_count = COALESCE(ai_agent_activity_daily.duration_count, 0)
                     + CASE WHEN :dur IS NULL THEN 0 ELSE 1 END,
-                duration_sum = ai_agent_activity_daily.duration_sum
+                duration_sum = COALESCE(ai_agent_activity_daily.duration_sum, 0)
                     + CASE WHEN :dur IS NULL THEN 0 ELSE :dur END,
                 avg_duration_ms = CASE
                     WHEN (
-                        ai_agent_activity_daily.duration_count
+                        COALESCE(ai_agent_activity_daily.duration_count, 0)
                         + CASE WHEN :dur IS NULL THEN 0 ELSE 1 END
                     ) = 0
                         THEN ai_agent_activity_daily.avg_duration_ms
                     ELSE ROUND(
                         (
-                            ai_agent_activity_daily.duration_sum
+                            COALESCE(ai_agent_activity_daily.duration_sum, 0)
                             + CASE WHEN :dur IS NULL THEN 0 ELSE :dur END
                         )::numeric
                         / NULLIF(
-                            ai_agent_activity_daily.duration_count
+                            COALESCE(ai_agent_activity_daily.duration_count, 0)
                             + CASE WHEN :dur IS NULL THEN 0 ELSE 1 END,
                             0
                         )

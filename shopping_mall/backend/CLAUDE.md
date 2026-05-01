@@ -29,8 +29,8 @@ AI_DATA_DIR     # .../backend/ai/data/
 
 LangChain tool calling 기반 에이전트. Primary LLM 장애 시 LangChain `.with_fallbacks()` 체인으로 Claude로 자동 전환.
 
-```
-ChatOpenAI (PRIMARY_LLM_*)
+```text
+ChatOpenAI (LITELLM_URL / LITELLM_API_KEY / LITELLM_MODEL)
   .bind_tools(tools).with_fallbacks([ChatAnthropic(...).bind_tools(tools)])
 ```
 
@@ -67,6 +67,33 @@ ChatOpenAI (PRIMARY_LLM_*)
 | `app/services/multi_agent_chatbot.py` | MultiAgentChatbotService — ChatLog/ToolMetric 저장 포함 |
 | `app/models/ticket.py` | ShopTicket — shop_tickets 테이블, 취소/교환 접수 결과 |
 
+### 주문 상태(status) 목록
+
+`shop_orders.status` 컬럼에 저장되는 유효한 값:
+
+| status | 한국어 | 전환 방식 | 취소 | 교환/반품 |
+|---|---|---|---|:---:|
+| `pending` | 주문 접수 | 주문 생성 기본값 | 즉시 자동 | ✗ |
+| `preparing` | 상품 준비 중 | admin 수동 (`PATCH /api/admin/orders/{id}/status`) | 즉시 자동 | ✗ |
+| `shipped` | 배송 중 | Shipment 생성 시 자동 | 관리자 검토 | ✗ |
+| `delivered` | 배송 완료 | Shipment.status=delivered 시 자동 | 불가 | ✅ |
+| `cancelled` | 취소 완료 | 자동/관리자 | 불가 | ✗ |
+| `returned` | 반품 완료 | 교환/취소 티켓 completed 시 자동 | 불가 | ✗ |
+
+**상태 전환 흐름:**
+
+```text
+pending → preparing → shipped → delivered
+   ↓           ↓         ↓          ↓
+(자동취소)  (자동취소) (관리자취소) → returned
+```
+
+Shipment.status는 별도 관리: `registered → picked_up → in_transit → delivered`
+
+비표준 값(`paid`, `registered`, `shipping`, `picked_up`, `in_transit` 등)은 인식되지 않습니다.  
+테스트 데이터 삽입 시에도 위 목록 중 하나를 사용해야 합니다.  
+기존 데이터 변환: `uv run python scripts/migrate_order_status.py --dry-run`
+
 ### 보안 규칙
 
 `refuse_request` 도구 — 타인 정보·내부 정보·서비스 범위 외 질문·탈옥·부적절 콘텐츠를 필터링합니다.
@@ -77,6 +104,7 @@ reason 코드: `other_user_info` | `internal_info` | `out_of_scope` | `jailbreak
 
 `get_order_status` 호출 시 LLM이 `user_id`를 인자로 넘기면 **타인 정보 조회 시도**로 간주하고 즉시 거절합니다.
 `GetOrderStatusInput` 스키마에 `user_id` 파라미터가 없으므로, LLM이 이를 명시한다는 것은 사용자가 특정 user_id를 요청한 신호입니다.
+
 ```python
 # executor.py — _run_loop 내부
 if tc["name"] == "get_order_status" and "user_id" in tc.get("args", {}):
@@ -113,13 +141,51 @@ _ROLE_MAP = {"user": "user", "assistant": "assistant", "bot": "assistant"}
 | 도구 | 컬렉션 | Settings 필드 | 기본값 | bge-m3 실측 거리 |
 |------|--------|--------------|--------|----------------|
 | `search_policy` | 정책 6종 | `rag_distance_threshold` | **0.50** | 관련 청크 0.24~0.45 |
-| `search_faq` | `faq` | `rag_distance_threshold` | **0.50** | 관련 청크 0.24~0.42 |
-| `search_farm_info` | `farm_intro` | `rag_distance_threshold` | **0.50** | — |
-| `search_storage_guide` | `storage_guide` | `rag_storage_distance_threshold` | 0.35 | 유사 항목 0.39~0.41 |
-| `search_storage_guide` (재시도) | `storage_guide` | `rag_storage_retry_threshold` | 0.40 | — |
+| `search_faq` | `faq` (통합) | `rag_distance_threshold` | **0.50** | 관련 청크 0.24~0.42 |
+
+`search_faq`는 단일 `faq` 컬렉션을 사용하며, `subcategory_slug` 메타데이터 필터로 분류를 좁힌다.
+보관법·제철정보·농장소개는 구 별도 컬렉션(`storage_guide`, `season_info`, `farm_intro`)에서 `faq` 통합 컬렉션으로 이전됨.
 
 임계값은 `app/core/config.py`의 `Settings` 클래스에서 관리하고 `.env`로 오버라이드합니다.  
 임베딩 모델 변경 시 반드시 re-seed + 재측정 → `/rag-diagnostic` 스킬 참고.
+
+### FAQ 카테고리 구조 (10개)
+
+`search_faq` 도구의 `subcategory` 파라미터 슬러그 목록.  
+변경 시 `cs_tools.py SearchFaqInput`, `migrate_json_to_faq_v2.py`, `seed_rag.py` 세 곳을 동시에 수정해야 한다.
+
+**이커머스 기본 (sort_order 1~5)**
+
+| slug | 이름 | 주요 소스 |
+|------|------|-----------|
+| `order` | 주문·결제 | faq(payment/order) + policy(payment) |
+| `delivery` | 배송·물류 | faq(delivery) + policy(delivery) + product(delivery) |
+| `exchange-return` | 교환·반품·환불 | faq(exchange/cancel) + policy(return) |
+| `membership` | 회원·적립금 | faq(membership) + policy(membership) |
+| `service` | 고객서비스 | faq(service/stock) + policy(service) |
+
+**농산물 특화 (sort_order 6~10)**
+
+| slug | 이름 | 주요 소스 |
+|------|------|-----------|
+| `product-quality` | 상품·품질·신선도 | faq(product) + product(quality/freshness/safety) + **policy(quality)** |
+| `certification` | 인증·친환경 | product(certification/environment) |
+| `storage` | 보관 방법 | storage_guide.json |
+| `season` | 제철·수확 정보 | season_info.json |
+| `origin` | 원산지·농장 | farm_info.json + product(origin) |
+
+**폐기된 슬러그** (DB에 is_active=False로 보관): `faq`, `farm`, `product`, `policy`
+
+### 정책 FAQ 인용 형식
+
+`policy_faq.json`의 각 항목에는 `citation` 필드가 있고, 마이그레이션 시 답변 말미에 자동 삽입된다.
+
+```text
+...답변 본문...
+(근거: 반품교환환불정책 제5조(반품 조건 및 배송비 부담) 제1항·제2항)
+```
+
+ChromaDB 메타데이터에도 `citation_doc`, `citation_article`, `citation_clause` 키로 저장된다.
 
 ### TraceStep
 
@@ -134,25 +200,38 @@ _ROLE_MAP = {"user": "user", "assistant": "assistant", "bot": "assistant"}
 |------|------|
 | `DATABASE_URL` | PostgreSQL 접속 URL |
 | `JWT_SECRET_KEY` | FarmOS 공유 JWT 시크릿 |
-| `OLLAMA_BASE_URL` | Ollama 서버 주소 — 임베딩 전용 (기본: `http://localhost:11434`) |
-| `OLLAMA_EMBED_MODEL` | ChromaDB 임베딩 모델 |
-| `UTILITY_LLM_BASE_URL` | 리포트/비용분류용 LLM 엔드포인트 (Ollama·OpenRouter 모두 가능) |
-| `UTILITY_LLM_API_KEY` | 리포트/비용분류용 LLM API 키 |
-| `UTILITY_LLM_MODEL` | 리포트/비용분류용 LLM 모델명 |
-| `PRIMARY_LLM_BASE_URL` | 에이전트 Primary LLM 엔드포인트 (Ollama·OpenRouter 모두 가능) |
-| `PRIMARY_LLM_API_KEY` | Primary LLM API 키 |
-| `PRIMARY_LLM_MODEL` | Primary LLM 모델명 |
+| `FARMOS_API_URL` | FarmOS 백엔드 주소 (기본: `http://localhost:8000/api/v1`) |
+| `ANNIVERSARY_API_KEY` | 공공데이터포털 공휴일 API 키 |
+| `EMBED_PROVIDER` | 임베딩 provider — `sentence_transformers` / `openrouter` / `openai` |
+| `EMBED_MODEL` | 임베딩 모델명 (기본: `BAAI/bge-m3`) |
+| `EMBED_API_KEY` | openai provider 전용 API 키 |
+| `LITELLM_URL` | LiteLLM 프록시 엔드포인트 — Primary + Utility LLM 공용 |
+| `LITELLM_API_KEY` | LiteLLM API 키 |
+| `LITELLM_MODEL` | LiteLLM 모델명 (기본: `openai/gpt-4o-mini`) |
+| `LLM_PROVIDER` | LLM provider 참고값 (기본: `openrouter`) |
 | `ANTHROPIC_API_KEY` | Fallback LLM — 없으면 폴백 비활성화 |
 | `CLAUDE_FALLBACK_MODEL` | Claude Fallback 모델 (기본: `claude-haiku-4-5`) |
 | `AGENT_MAX_ITERATIONS` | 에이전트 최대 반복 횟수 (기본: `10`) |
-| `ANNIVERSARY_API_KEY` | 공공데이터포털 공휴일 API 키 |
-| `POLICY_DOCS_DIR` | 정책 문서 폴더 (기본: `ai/docs/`, gitignore — 로컬 배치 필요) |
-| `RERANKER_MODEL` | Cross-Encoder 재랭킹 모델 (기본: `dragonkue/bge-reranker-v2-m3-ko`) — 비워두면 재랭킹 비활성화 |
+| `RERANKER_MODEL` | Cross-Encoder 재랭킹 모델 (기본: `dragonkue/bge-reranker-v2-m3-ko`) — 비워두면 비활성화 |
 | `LANGCHAIN_TRACING_V2` | LangSmith 트레이싱 활성화 (`true` / `false`, 기본: `false`) |
 | `LANGCHAIN_API_KEY` | LangSmith API 키 — `smith.langchain.com`에서 발급 |
-| `LANGCHAIN_PROJECT` | LangSmith 프로젝트명 (기본: `farmos-chatbot`) |
+| `LANGCHAIN_PROJECT` | LangSmith 프로젝트명 (기본: `farmos-shoppingmall-chatbot`) |
+| `POLICY_DOCS_DIR` | 정책 문서 폴더 (기본: `ai/docs/`, gitignore — 로컬 배치 필요) |
 
-Provider 전환은 `PRIMARY_LLM_*` 세 값만 교체하면 됩니다. 자세한 예시는 `ai/agent/clients/README.md` 참고.
+Provider 전환은 `LITELLM_URL` / `LITELLM_API_KEY` / `LITELLM_MODEL` 세 값만 교체하면 됩니다.
+
+---
+
+## 헬스체크
+
+```bash
+# 쇼핑몰 백엔드 DB 연결 상태 확인
+curl http://localhost:4000/health
+# → {"status": "ok", "storage": "postgres"}
+# → {"status": "degraded", "storage": "postgres"}  (DB 장애 시)
+```
+
+FarmOS 백엔드: `GET /api/v1/health` (동일 응답 형식)
 
 ---
 

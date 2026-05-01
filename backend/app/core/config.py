@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -134,6 +135,18 @@ class Settings(BaseSettings):
     SUBSIDY_RERANKER_MODEL: str = "dragonkue/bge-reranker-v2-m3-ko"
     SUBSIDY_PDF_PATH: str = "data/gov/2026_공익직불_시행지침.pdf"
     SUBSIDY_MARKDOWN_CACHE_PATH: str = "data/gov/2026_공익직불_시행지침.md"
+
+    # ── 영농일지 Vision 입력 (사진 → AI 자동 작성) ─────────────────────────────
+    # LiteLLM 프록시에 등록된 vision-capable 모델 ID. 기존 LITELLM_URL/LITELLM_API_KEY 재사용.
+    # 2026-04-28 기준 프록시 등록 vision 모델: gpt-5-mini, gpt-5-nano (GPT-5 family).
+    # Gemini 2.5 Flash 등 다른 모델 등록 시 .env 의 LITELLM_VISION_MODEL 으로 오버라이드.
+    # 숫자 제한들은 Field 로 범위 검증해 startup 시점에 fail-fast (env 오입력 방어).
+    LITELLM_VISION_MODEL: str = Field(default="gpt-5-mini", min_length=1)
+    JOURNAL_VISION_TIMEOUT_S: float = Field(default=120.0, gt=0, le=300)
+    JOURNAL_VISION_MAX_IMAGES: int = Field(default=10, ge=1, le=20)
+    JOURNAL_VISION_MAX_BYTES: int = Field(
+        default=5 * 1024 * 1024, ge=1, le=50 * 1024 * 1024
+    )  # 1B ~ 50MB
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

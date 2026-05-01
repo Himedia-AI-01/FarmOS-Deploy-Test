@@ -1,5 +1,7 @@
 """Simple demand forecasting using moving average."""
 from datetime import datetime, timedelta
+
+from app.core.datetime_utils import now_kst
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -8,7 +10,7 @@ from app.models.order import Order, OrderItem
 
 def forecast_demand(db: Session, product_id: int, weeks: int = 4) -> dict:
     """Calculate moving average of weekly sales for a product over the last N weeks."""
-    now = datetime.utcnow()
+    now = now_kst()
     weekly_sales = []
 
     for i in range(weeks):
@@ -22,7 +24,7 @@ def forecast_demand(db: Session, product_id: int, weeks: int = 4) -> dict:
                 OrderItem.product_id == product_id,
                 Order.created_at >= week_start,
                 Order.created_at < week_end,
-                Order.status != "cancelled",
+                Order.status.notin_(["cancelled", "returned"]),
             )
             .scalar()
         )

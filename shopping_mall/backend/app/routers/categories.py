@@ -8,6 +8,6 @@ from app.schemas.category import CategoryTree
 router = APIRouter(prefix="/api/categories", tags=["categories"])
 
 
-@router.get("/", response_model=List[CategoryTree])
+@router.get("", response_model=List[CategoryTree])
 def list_categories(db: Session = Depends(get_db)):
     return get_categories_tree(db)
