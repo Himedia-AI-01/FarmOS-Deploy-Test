@@ -1,6 +1,9 @@
 """Simulated shipping status tracker."""
 import json
 from datetime import datetime
+from typing import Optional
+
+from app.core.datetime_utils import now_kst
 from sqlalchemy.orm import Session
 
 from app.models.shipment import Shipment
@@ -22,7 +25,7 @@ class ShippingTracker:
         if shipment.status == "delivered":
             return "delivered"
 
-        now = datetime.utcnow()
+        now = now_kst()
         if shipment.created_at is None:
             return shipment.status
 
@@ -38,14 +41,29 @@ class ShippingTracker:
         return new_status
 
     @classmethod
-    def update_shipment(cls, shipment: Shipment) -> bool:
-        """Update a single shipment. Returns True if status changed."""
+    def update_shipment(cls, shipment: Shipment, db: Optional[Session] = None) -> bool:
+        """Update a single shipment. Returns True if status changed.
+
+        Args:
+            shipment: 업데이트할 Shipment 객체
+            db: SQLAlchemy 세션 — 전달 시 Shipment.status=delivered 전환에 맞춰
+                Order.status(shipped → delivered)를 동기화합니다.
+                None이면 Order 동기화를 건너뜁니다.
+        """
         new_status = cls.check_status(shipment)
         if new_status == shipment.status:
-            shipment.last_checked_at = datetime.utcnow()
+            shipment.last_checked_at = now_kst()
+            # check_status()는 in_transit까지만 자동 전환하므로 "delivered" 상태인
+            # shipment는 항상 이 경로로 돌아온다.  외부에서 직접 delivered로 설정된
+            # 경우에도 Order 동기화가 누락되지 않도록 여기서 방어적으로 처리한다.
+            if new_status == "delivered" and db is not None:
+                from app.models.order import Order
+                order = db.query(Order).filter(Order.id == shipment.order_id).first()
+                if order and order.status == "shipped":
+                    order.status = "delivered"
             return False
 
-        now = datetime.utcnow()
+        now = now_kst()
         old_status = shipment.status
 
         # Update tracking history
@@ -68,6 +86,12 @@ class ShippingTracker:
 
         if new_status == "delivered":
             shipment.delivered_at = now
+            # Order 상태 동기화: shipped → delivered
+            if db is not None:
+                from app.models.order import Order
+                order = db.query(Order).filter(Order.id == shipment.order_id).first()
+                if order and order.status == "shipped":
+                    order.status = "delivered"
 
         return True
 
@@ -81,7 +105,7 @@ class ShippingTracker:
         )
         updated = 0
         for shipment in shipments:
-            if cls.update_shipment(shipment):
+            if cls.update_shipment(shipment, db=db):
                 updated += 1
 
         if updated > 0:

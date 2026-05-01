@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 
 from sqlalchemy import Integer, String, Date, DateTime, Text, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
@@ -12,6 +12,11 @@ class JournalEntry(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(
         String(10), ForeignKey("users.id"), nullable=False
+    )
+    photos: Mapped[list["JournalEntryPhoto"]] = relationship(
+        back_populates="entry",
+        cascade="all, delete-orphan",
+        lazy="selectin",
     )
 
     # ── 필수 (농업ON ■) ──
@@ -72,3 +77,39 @@ class JournalEntry(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class JournalEntryPhoto(Base):
+    """영농일지 entry 에 첨부된 사진 메타데이터.
+
+    파일 자체는 디스크 (UPLOAD_BASE_DIR/journal/{user_id}/) 에 저장되고,
+    DB 행은 그 메타와 entry/owner 관계를 보관한다. entry_id=null 인 행은
+    분석만 끝나고 아직 entry 와 연결되지 않은 임시 사진 (24h 후 cleanup).
+    """
+
+    __tablename__ = "journal_entry_photos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entry_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("journal_entries.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(10), ForeignKey("users.id"), nullable=False, index=True
+    )
+    file_path: Mapped[str] = mapped_column(String(255), nullable=False)
+    thumb_path: Mapped[str | None] = mapped_column(String(255), default=None)
+    original_filename: Mapped[str | None] = mapped_column(String(255), default=None)
+    mime_type: Mapped[str] = mapped_column(String(50), default="image/jpeg")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    width: Mapped[int | None] = mapped_column(Integer, default=None)
+    height: Mapped[int | None] = mapped_column(Integer, default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+
+    entry: Mapped["JournalEntry | None"] = relationship(back_populates="photos")

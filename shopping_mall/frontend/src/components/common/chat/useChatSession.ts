@@ -215,7 +215,13 @@ export function useSendMessage() {
       }, {
         headers: { 'X-User-Id': userId },
       });
-      return data as { answer: string; intent: string; escalated: boolean };
+      return data as {
+        answer: string;
+        intent: string;
+        escalated: boolean;
+        chat_log_id?: number;
+        cited_faq_ids?: number[];
+      };
     },
     onMutate: async ({ question, userId, sessionId }) => {
       // Cancel ongoing queries to prevent race conditions
@@ -255,7 +261,9 @@ export function useSendMessage() {
             role: 'bot' as const,
             text: data.answer,
             intent: data.intent,
-            escalated: data.escalated
+            escalated: data.escalated,
+            ...(data.chat_log_id != null && { chat_log_id: data.chat_log_id }),
+            ...(data.cited_faq_ids?.length && { cited_faq_ids: data.cited_faq_ids }),
           }
         ]);
       }

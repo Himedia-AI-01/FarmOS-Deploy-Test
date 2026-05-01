@@ -19,7 +19,7 @@ def sync_orders_to_revenue(db: Session) -> int:
     orders = (
         db.query(Order)
         .filter(
-            Order.status.in_(["paid", "shipping", "delivered"]),
+            Order.status == "delivered",
             Order.id.notin_(synced_order_ids) if synced_order_ids else True,
         )
         .all()

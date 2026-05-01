@@ -19,6 +19,7 @@ import { formatDate, formatPrice } from '@/lib/utils';
 const CARRIERS = ['CJ대한통운', '한진', '로젠', '우체국택배', '롯데택배'];
 
 type StatusFilter = TicketStatus | 'all';
+type CategoryFilter = 'all' | 'product' | 'delivery';
 type ActionFilter = TicketActionType | 'all';
 
 const STATUS_TABS: { value: StatusFilter; label: string }[] = [
@@ -28,6 +29,34 @@ const STATUS_TABS: { value: StatusFilter; label: string }[] = [
   { value: 'completed', label: '완료' },
   { value: 'cancelled', label: '취소' },
 ];
+
+const CATEGORY_TABS: { value: CategoryFilter; label: string }[] = [
+  { value: 'all',      label: '전체' },
+  { value: 'product',  label: '상품' },
+  { value: 'delivery', label: '배송' },
+];
+
+/** 카테고리별 소분류 액션 필터 */
+const CATEGORY_SUB_ACTIONS: Record<CategoryFilter, { value: ActionFilter; label: string }[]> = {
+  all: [
+    { value: 'all',      label: '전체' },
+    { value: 'exchange', label: '교환' },
+    { value: 'cancel',   label: '취소' },
+  ],
+  product: [
+    { value: 'all',      label: '전체' },
+    { value: 'exchange', label: '교환' },
+    { value: 'cancel',   label: '취소' },
+  ],
+  delivery: [],
+};
+
+/** 카테고리에 해당하는 action_type 목록 (프론트 필터링용) */
+const CATEGORY_ACTION_TYPES: Record<CategoryFilter, TicketActionType[]> = {
+  all:      ['cancel', 'exchange'],
+  product:  ['cancel', 'exchange'],
+  delivery: [],
+};
 
 // 다음 가능한 상태 전이
 const NEXT_STATUSES: Record<TicketStatus, TicketStatus[]> = {
@@ -215,8 +244,8 @@ function TicketCard({
       onClick={onClick}
       className={`w-full text-left p-4 rounded-xl transition-all ${
         selected
-          ? 'bg-emerald-50 border border-emerald-100 shadow-sm'
-          : 'bg-white/40 border border-transparent hover:bg-surface-container-lowest hover:border-stone-100'
+          ? 'bg-emerald-50 border border-emerald-300 shadow-md ring-1 ring-emerald-200/60'
+          : 'bg-white border border-stone-200 shadow-sm hover:border-emerald-200 hover:shadow-md'
       }`}
       aria-pressed={selected}
     >
@@ -612,8 +641,15 @@ function TicketDetail({ ticket }: { ticket: Ticket }) {
 export default function TicketsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
   const [actionFilter, setActionFilter] = useState<ActionFilter>('all');
   const [selected, setSelected] = useState<Ticket | null>(null);
+
+  const handleCategoryChange = (cat: CategoryFilter) => {
+    setCategoryFilter(cat);
+    setActionFilter('all');
+    setSelected(null);
+  };
 
   const { data: tickets = [], isLoading } = useTickets({
     status: statusFilter === 'all' ? undefined : statusFilter,
@@ -623,14 +659,21 @@ export default function TicketsPage() {
 
   const q = searchParams.get('q')?.trim() ?? '';
   const qLower = q.toLowerCase();
+
+  // 카테고리 대분류 필터 (프론트 필터링)
+  const allowedActionTypes = CATEGORY_ACTION_TYPES[categoryFilter];
+  const categoryFiltered = categoryFilter === 'all'
+    ? tickets
+    : tickets.filter((t) => allowedActionTypes.includes(t.action_type));
+
   const visibleTickets = q
-    ? tickets.filter(
+    ? categoryFiltered.filter(
         (t) =>
           String(t.id).includes(qLower) ||
           String(t.order_id).includes(qLower) ||
           (t.user_name?.toLowerCase().includes(qLower) ?? false),
       )
-    : tickets;
+    : categoryFiltered;
 
   // URL ?ticketId=X 로 진입하면 해당 티켓을 자동 선택
   useEffect(() => {
@@ -657,7 +700,7 @@ export default function TicketsPage() {
             <h2 className="text-xl font-bold text-on-surface mb-6">CS 운영</h2>
 
             {/* Status tabs — pill style */}
-            <div className="flex gap-1 overflow-x-auto mb-4 bg-surface-container rounded-lg p-1 no-scrollbar">
+            <div className="grid grid-cols-5 gap-0.5 mb-4 bg-surface-container rounded-lg p-1">
               {STATUS_TABS.map((tab) => {
                 const count =
                   tab.value === 'all'
@@ -670,58 +713,91 @@ export default function TicketsPage() {
                     key={tab.value}
                     type="button"
                     onClick={() => { setStatusFilter(tab.value); setSelected(null); }}
-                    className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
+                    className={`flex flex-col items-center justify-center py-1.5 text-[11px] font-semibold rounded-md transition-colors ${
                       isActive
                         ? 'bg-white text-primary shadow-sm'
                         : 'text-stone-500 hover:bg-white/50'
                     }`}
                     aria-pressed={isActive}
                   >
-                    {tab.label}
-                    {count != null && count > 0 && (
-                      <span className="ml-1 opacity-60">{count}</span>
-                    )}
+                    <span>{tab.label}</span>
+                    <span className={`text-[10px] font-bold leading-tight ${isActive ? 'text-primary/70' : 'text-stone-400'}`}>
+                      {count ?? 0}
+                    </span>
                   </button>
                 );
               })}
             </div>
 
-            {/* Action type toggles */}
-            <div className="flex items-center gap-2 mb-2">
-              {([['all', '전체'], ['exchange', '교환'], ['cancel', '취소']] as const).map(([val, label]) => {
-                const isActive = actionFilter === val;
-                let baseClass = '';
-                if (val === 'all') {
-                  baseClass = isActive
-                    ? 'bg-stone-300 text-stone-800'
-                    : 'bg-stone-200 text-stone-700 hover:bg-stone-300';
-                } else if (val === 'exchange') {
-                  baseClass = isActive
-                    ? 'bg-primary-fixed-dim/40 text-on-primary-fixed-variant'
-                    : 'bg-primary-fixed-dim/20 text-on-primary-fixed-variant hover:bg-primary-fixed-dim/30';
-                } else {
-                  baseClass = isActive
-                    ? 'bg-tertiary-fixed-dim/40 text-on-tertiary-fixed-variant'
-                    : 'bg-tertiary-fixed-dim/20 text-on-tertiary-fixed-variant hover:bg-tertiary-fixed-dim/30';
-                }
-
+            {/* Category (대분류) */}
+            <div className="flex gap-1.5 mb-3">
+              {CATEGORY_TABS.map((cat) => {
+                const isActive = categoryFilter === cat.value;
+                // 카테고리별 카운트 계산
+                const catCount = cat.value === 'all'
+                  ? (stats?.total ?? 0)
+                  : cat.value === 'delivery'
+                    ? 0
+                    : (stats?.exchange ?? 0) + (stats?.cancel ?? 0);
                 return (
                   <button
-                    key={val}
+                    key={cat.value}
                     type="button"
-                    onClick={() => { setActionFilter(val); setSelected(null); }}
-                    className={`px-3 py-1 rounded-full text-[11px] font-bold tracking-wider transition-colors ${baseClass}`}
+                    onClick={() => handleCategoryChange(cat.value)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-colors ${
+                      isActive
+                        ? 'bg-stone-800 text-white border-stone-800 shadow-sm'
+                        : 'bg-white text-stone-600 border-stone-300 hover:border-stone-500 hover:text-stone-800'
+                    }`}
                     aria-pressed={isActive}
                   >
-                    {label}
+                    {cat.label}
+                    <span className={`text-[10px] font-medium ${isActive ? 'text-white/70' : 'text-stone-400'}`}>
+                      {catCount}
+                    </span>
                   </button>
                 );
               })}
-
-              <span className="ml-auto text-[11px] text-stone-400 font-medium">
+              <span className="ml-auto text-[11px] text-stone-400 font-medium self-center">
                 {visibleTickets.length}건
               </span>
             </div>
+
+            {/* Action type (소분류) */}
+            {categoryFilter === 'delivery' ? (
+              <p className="text-[11px] text-stone-400 mb-2 pl-1">배송 관련 티켓 유형은 준비 중입니다.</p>
+            ) : (
+              <div className="flex items-center gap-1.5 mb-2">
+                {CATEGORY_SUB_ACTIONS[categoryFilter].map(({ value: val, label }) => {
+                  const isActive = actionFilter === val;
+                  let baseClass = '';
+                  if (val === 'all') {
+                    baseClass = isActive
+                      ? 'bg-stone-700 text-white border-stone-700 shadow-sm'
+                      : 'bg-white text-stone-600 border-stone-300 hover:border-stone-500 hover:text-stone-800';
+                  } else if (val === 'exchange') {
+                    baseClass = isActive
+                      ? 'bg-violet-600 text-white border-violet-600 shadow-sm'
+                      : 'bg-white text-violet-700 border-violet-400 hover:border-violet-600 hover:bg-violet-50';
+                  } else {
+                    baseClass = isActive
+                      ? 'bg-rose-500 text-white border-rose-500 shadow-sm'
+                      : 'bg-white text-rose-600 border-rose-400 hover:border-rose-600 hover:bg-rose-50';
+                  }
+                  return (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => { setActionFilter(val); setSelected(null); }}
+                      className={`px-3 py-1 rounded-full text-[11px] font-bold tracking-wider border transition-colors ${baseClass}`}
+                      aria-pressed={isActive}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Ticket list */}

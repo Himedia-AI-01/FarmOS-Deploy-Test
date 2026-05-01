@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, List, Optional
 from datetime import datetime
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -25,6 +25,12 @@ class Product(Base):
     images: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     options: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     stock: Mapped[int] = mapped_column(Integer, default=0)
+    # ④ 재고 임계값 자동 제어 ─────────────────────────────────────────────
+    # stock=0 이면 자동으로 False, 재고 복구 시 자동으로 True
+    is_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # 최소 재고 알림 임계값: stock <= low_stock_threshold 이면 운영 대시보드에서 경고 표시
+    low_stock_threshold: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    # ─────────────────────────────────────────────────────────────────────
     restock_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     rating: Mapped[float] = mapped_column(Float, default=0.0)
     review_count: Mapped[int] = mapped_column(Integer, default=0)

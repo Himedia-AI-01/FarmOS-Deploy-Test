@@ -128,12 +128,14 @@ export function useManualControl() {
   ) => {
     if (!controlState) return;
 
-    const current = controlState[controlType];
-    const newActive = !current.active;
+    const newActive = !controlState[controlType].active;
 
+    // controlState[controlType] 는 union 이라 비공통 필드 직접 접근 시 TS2339.
+    // case 안에서 리터럴 키로 다시 접근해 narrowing.
     let toggleState: Record<string, unknown>;
     switch (controlType) {
-      case 'ventilation':
+      case 'ventilation': {
+        const current = controlState.ventilation;
         // Design Ref: §5.2 — 시뮬 OFF 시 현재값 저장 → 수동 ON 토글 시 복원 가능
         if (!newActive) {
           lastKnownValuesRef.current.ventilation = {
@@ -147,13 +149,15 @@ export function useManualControl() {
           on: newActive,
         };
         break;
+      }
       case 'irrigation':
         toggleState = { valve_open: newActive };
         break;
       case 'lighting':
         toggleState = { on: newActive, brightness_pct: newActive ? 60 : 0 };
         break;
-      case 'shading':
+      case 'shading': {
+        const current = controlState.shading;
         // Design Ref: §5.2 — 시뮬 OFF 시 현재값 저장
         if (!newActive) {
           lastKnownValuesRef.current.shading = {
@@ -167,6 +171,7 @@ export function useManualControl() {
           on: newActive,
         };
         break;
+      }
     }
 
     // 낙관적 업데이트
@@ -271,7 +276,8 @@ export function useManualControl() {
         !('on' in incoming) &&
         (ct === 'ventilation' || ct === 'lighting' || ct === 'shading')
       ) {
-        const prevState = prev[ct] as Record<string, unknown>;
+        // union 에 인덱스 시그니처 부재 — unknown 경유로 안전 캐스트.
+        const prevState = prev[ct] as unknown as Record<string, unknown>;
         const ledOn = incoming.led_on ?? prevState.led_on;
         const active = incoming.active ?? prevState.active;
         const derived = ledOn ?? active ?? prevState.on;
@@ -279,7 +285,7 @@ export function useManualControl() {
           merged.on = Boolean(derived);
         }
       }
-      return { ...prev, [ct]: merged as (typeof prev)[typeof ct] };
+      return { ...prev, [ct]: merged as unknown as (typeof prev)[typeof ct] };
     });
   }, []);
 

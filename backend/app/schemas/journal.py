@@ -44,7 +44,10 @@ class JournalEntryCreate(BaseModel):
 
     # 시스템
     raw_stt_text: str | None = None
-    source: Literal["stt", "text", "auto"] = "text"
+    source: Literal["stt", "text", "auto", "vision"] = "text"
+
+    # 첨부 사진 (parse-photos / POST /journal/photos 로 미리 저장된 사진 ID 들)
+    photo_ids: list[int] | None = None
 
 
 class JournalEntryUpdate(BaseModel):
@@ -73,8 +76,24 @@ class JournalEntryUpdate(BaseModel):
 
     detail: str | None = None
 
+    # 사진 목록 변경 (None 이면 변경 없음, 빈 리스트면 모두 제거)
+    photo_ids: list[int] | None = None
+
 
 # ── 응답 ──
+
+
+class JournalEntryPhotoResponse(BaseModel):
+    """영농일지 첨부 사진 메타."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    width: int | None = None
+    height: int | None = None
+    size_bytes: int = 0
+    mime_type: str = "image/jpeg"
+    created_at: datetime
 
 
 class JournalEntryResponse(BaseModel):
@@ -111,6 +130,8 @@ class JournalEntryResponse(BaseModel):
 
     created_at: datetime
     updated_at: datetime
+
+    photos: list[JournalEntryPhotoResponse] = []
 
 
 class JournalEntryListResponse(BaseModel):

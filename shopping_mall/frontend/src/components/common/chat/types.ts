@@ -26,6 +26,10 @@ export interface ChatSessionMessage {
   intent?: string;
   escalated?: boolean;
   createdAt?: string;
+  /** DB chat_log.id — 피드백 제출에 사용 */
+  chat_log_id?: number;
+  /** 이 응답에서 인용된 FAQ 문서 ID 목록 */
+  cited_faq_ids?: number[];
 }
 
 export type ChatView = 'list' | 'chat';

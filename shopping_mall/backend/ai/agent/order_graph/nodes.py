@@ -27,17 +27,17 @@ logger = logging.getLogger(__name__)
 # ── 상수 ───────────────────────────────────────────────────────────────────────
 
 # 취소 가능 상태: 아직 배송사에 픽업되지 않은 주문
-CANCELLABLE_STATUSES: frozenset[str] = frozenset({"pending", "registered"})
+CANCELLABLE_STATUSES: frozenset[str] = frozenset({"pending", "preparing"})
 # 교환 가능 상태: 수령 완료된 주문
 EXCHANGEABLE_STATUSES: frozenset[str] = frozenset({"delivered"})
 
 _STATUS_DISPLAY: dict[str, str] = {
-    "pending":    "결제 완료 (배송 준비 전)",
-    "registered": "배송 준비 중",
-    "picked_up":  "배송 중 (픽업 완료)",
-    "in_transit": "배송 중",
-    "delivered":  "배송 완료",
-    "cancelled":  "취소 완료",
+    "pending":   "주문 접수",
+    "preparing": "상품 준비 중",
+    "shipped":   "배송 중",
+    "delivered": "배송 완료",
+    "cancelled": "취소 완료",
+    "returned":  "반품 완료",
 }
 
 
@@ -224,7 +224,7 @@ async def route_action(state: OrderState, config: RunnableConfig) -> dict:
 async def list_orders(state: OrderState, config: RunnableConfig) -> dict:
     """취소/교환 가능한 주문 목록 조회 → interrupt로 선택 대기.
 
-    - 취소: pending / registered 상태만 (배송 픽업 전)
+    - 취소: pending / preparing 상태만 (배송 픽업 전)
     - 교환: delivered 상태만 (수령 완료)
     """
     from app.models.order import Order
@@ -496,9 +496,20 @@ async def show_summary(state: OrderState, config: RunnableConfig) -> dict:
 
 
 async def create_ticket(state: OrderState, config: RunnableConfig) -> dict:
-    """티켓 발행 — DB INSERT."""
+    """티켓 발행 — DB INSERT + 정책 기반 자동 처리.
+
+    취소(cancel) + 배송 전(pending/preparing):
+      → OrderProcessor.apply_auto_cancel(): Order.status=cancelled + 재고 복구 + ticket.status=completed
+      → 단일 트랜잭션 commit
+      → 응답: auto_cancelled
+
+    배송 중 취소 또는 교환 접수:
+      → ticket.status=received 유지 (관리자 검토 대기)
+      → 응답: admin_pending_cancel / ticket_created
+    """
     from app.models.ticket import ShopTicket
     from app.models.order import Order
+    from app.services.order_processor import OrderProcessor, AUTO_CANCEL_STATUSES
     from sqlalchemy.exc import IntegrityError
 
     db = _get_db(config)
@@ -529,7 +540,7 @@ async def create_ticket(state: OrderState, config: RunnableConfig) -> dict:
             "is_pending": False,
         }
 
-    # 멱등성 검사 — LangGraph 재실행(interrupt 재진입) 시 중복 티켓 방지
+    # 멱등성 검사 — 이미 접수된 티켓이 있으면 새로 INSERT하지 않고 재사용
     _active_filter = [
         ShopTicket.user_id == state["user_id"],
         ShopTicket.order_id == state["order_id"],
@@ -539,39 +550,20 @@ async def create_ticket(state: OrderState, config: RunnableConfig) -> dict:
     existing = db.query(ShopTicket).filter(*_active_filter).first()
     if existing:
         logger.info(
-            "[order_graph] 중복 티켓 감지: #%s user=%s action=%s order=%s",
+            "[order_graph] 기존 티켓 재사용: #%s user=%s action=%s order=%s",
             existing.id, state["user_id"], state["action"], state["order_id"],
         )
         action_ko = "취소" if state["action"] == "cancel" else "교환"
-        prompt = ORDER_PROMPTS["duplicate_ticket"].format(
+        response = ORDER_PROMPTS["ticket_unchanged"].format(
             action=action_ko, ticket_id=existing.id
         )
-
-        # ── interrupt: 수정 여부 확인 ─────────────────────────────────
-        user_input = interrupt(prompt)
-
-        if _is_confirm_intent(user_input) and not _is_flow_abort_intent(user_input, state["action"]):
-            # 기존 티켓을 새로 입력된 내용으로 업데이트
-            if state.get("reason"):
-                existing.reason = state["reason"]
-            if state["action"] == "cancel" and state.get("refund_method"):
-                existing.refund_method = state["refund_method"]
-            if state["action"] == "exchange" and state.get("selected_items"):
-                existing.items = json.dumps(state["selected_items"], ensure_ascii=False)
-            db.commit()
-            logger.info(
-                "[order_graph] 기존 티켓 수정: #%s user=%s",
-                existing.id, state["user_id"],
-            )
-            response = ORDER_PROMPTS["ticket_modified"].format(ticket_id=existing.id)
-        else:
-            logger.info(
-                "[order_graph] 기존 티켓 유지: #%s user=%s",
-                existing.id, state["user_id"],
-            )
-            response = ORDER_PROMPTS["ticket_unchanged"].format(ticket_id=existing.id)
-
         return {**state, "ticket_id": existing.id, "response": response, "is_pending": False}
+
+    # ── 자동 취소 가능 여부 판단 (INSERT 전에 결정 — 트랜잭션 설계 명확화) ─────
+    is_auto_cancel = (
+        state["action"] == "cancel"
+        and order.status in AUTO_CANCEL_STATUSES
+    )
 
     items_json = json.dumps(state.get("selected_items", []), ensure_ascii=False) or None
 
@@ -587,11 +579,17 @@ async def create_ticket(state: OrderState, config: RunnableConfig) -> dict:
     )
     db.add(ticket)
     try:
+        db.flush()  # ticket.id 확보 (apply_auto_cancel 내부에서 참조)
+
+        if is_auto_cancel:
+            # 단일 트랜잭션: Order.status=cancelled + 재고 복구 + ticket.status=completed
+            OrderProcessor.apply_auto_cancel(db, order, ticket)
+
         db.commit()
         db.refresh(ticket)
         logger.info(
-            "[order_graph] 티켓 발행: #%s user=%s action=%s order=%s",
-            ticket.id, state["user_id"], state["action"], state["order_id"],
+            "[order_graph] 티켓 발행: #%s user=%s action=%s order=%s auto_cancel=%s",
+            ticket.id, state["user_id"], state["action"], state["order_id"], is_auto_cancel,
         )
     except IntegrityError:
         # 동시 요청이 체크 이후 먼저 커밋한 경우 — 롤백 후 기존 티켓 재사용
@@ -603,8 +601,18 @@ async def create_ticket(state: OrderState, config: RunnableConfig) -> dict:
             "[order_graph] 동시 삽입 충돌 — 기존 티켓 재사용: #%s user=%s order=%s",
             ticket.id, state["user_id"], state["order_id"],
         )
+        is_auto_cancel = False  # 재사용 경로에서는 자동 취소 미적용
 
-    response = ORDER_PROMPTS["ticket_created"].format(ticket_id=ticket.id)
+    # ── 응답 메시지 분기 ────────────────────────────────────────────────────
+    if is_auto_cancel:
+        response = ORDER_PROMPTS["auto_cancelled"].format(ticket_id=ticket.id)
+    elif state["action"] == "cancel":
+        # 배송 중 취소 — 관리자 검토 대기
+        response = ORDER_PROMPTS["admin_pending_cancel"].format(ticket_id=ticket.id)
+    else:
+        # 교환 접수
+        response = ORDER_PROMPTS["ticket_created"].format(ticket_id=ticket.id)
+
     return {**state, "ticket_id": ticket.id, "response": response, "is_pending": False}
 
 

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models.order import Order
 from app.models.shipment import Shipment
 from app.models.ticket import ShopTicket
 from app.schemas.shipment import ShipmentCreate, ShipmentResponse
@@ -26,6 +27,13 @@ def create_shipment(body: ShipmentCreate, db: Session = Depends(get_db)):
         related_ticket_id=body.related_ticket_id,
     )
     db.add(shipment)
+    db.flush()  # shipment.id 확보
+
+    # preparing → shipped 자동 전환 (교환 배송 시 원 주문은 delivered → 조건 False로 안전)
+    order = db.query(Order).filter(Order.id == body.order_id).first()
+    if order and order.status == "preparing":
+        order.status = "shipped"
+
     db.commit()
     db.refresh(shipment)
     return shipment

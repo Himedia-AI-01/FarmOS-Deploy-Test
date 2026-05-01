@@ -33,6 +33,7 @@ NodeJS 호출 예:
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import subprocess
@@ -45,6 +46,34 @@ ROOT = Path(__file__).resolve().parents[1]
 FARMOS_BACKEND = ROOT / "backend"
 SHOP_BACKEND = ROOT / "shopping_mall" / "backend"
 
+# [TEMP DIAG] Web_Starter vs CLI 환경 차이 진단용. 정상 확인 후 이 블록 제거.
+_DIAG_LOG = ROOT / "logs" / "bootstrap_diagnose.log"
+
+
+def _diag_append(label: str, extras: dict[str, str] | None = None) -> None:
+    try:
+        _DIAG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        keys = ("DATABASE_URL", "PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "PYTHONIOENCODING", "PYTHONUTF8")
+        lines = [
+            f"\n=== {datetime.datetime.now().isoformat()} {label} ===",
+            f"sys.executable = {sys.executable!r}",
+            f"cwd            = {os.getcwd()!r}",
+            f"argv           = {sys.argv!r}",
+            f".env (cwd)     = {os.path.exists('.env')!r}",
+            f"backend/.env   = {(ROOT / 'backend' / '.env').exists()!r}",
+        ]
+        for k in keys:
+            lines.append(f"env[{k}] = {os.environ.get(k, '<unset>')!r}")
+        path = os.environ.get("PATH", "")
+        lines.append(f"PATH (first 400) = {path[:400]!r}")
+        if extras:
+            for k, v in extras.items():
+                lines.append(f"{k} = {v}")
+        with open(_DIAG_LOG, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception as exc:  # 진단 코드는 절대 본 흐름을 깨면 안 됨.
+        sys.stderr.write(f"[diag] write failed: {exc}\n")
+
 
 def _run_meta_extractor(label: str, python_exe: str, cwd: Path, code: str) -> dict:
     env = os.environ.copy()
@@ -55,6 +84,18 @@ def _run_meta_extractor(label: str, python_exe: str, cwd: Path, code: str) -> di
     # 자식 Python 의 stdout/stderr 를 UTF-8 로 강제 (Windows 콘솔 cp949 회피)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    # [TEMP DIAG] inner subprocess 가 진단 로그를 append 할 경로 전달.
+    env["FARMOS_DIAG_LOG"] = str(_DIAG_LOG)
+    _diag_append(
+        f"OUTER → spawn inner [{label}]",
+        extras={
+            "python_exe": repr(python_exe),
+            "child_cwd": repr(str(cwd)),
+            "child_env[DATABASE_URL]": repr(env.get("DATABASE_URL", "<unset>")),
+            "child_env[VIRTUAL_ENV]": repr(env.get("VIRTUAL_ENV", "<unset>")),
+            "child_env[PYTHONHOME]": repr(env.get("PYTHONHOME", "<unset>")),
+        },
+    )
 
     result = subprocess.run(
         [python_exe, "-c", code],
@@ -85,7 +126,36 @@ def _run_meta_extractor(label: str, python_exe: str, cwd: Path, code: str) -> di
 # Base.metadata.tables 를 순회하여 컬럼/타입/nullable/default 를 dict 로 정규화.
 FARMOS_META_CODE = r"""
 import json
+import os
 import sys
+import datetime
+import traceback
+
+# [TEMP DIAG] Settings 로드 전 inner 환경 스냅샷.
+_DIAG = os.environ.get("FARMOS_DIAG_LOG")
+def _diag_w(msg):
+    if not _DIAG:
+        return
+    try:
+        with open(_DIAG, "a", encoding="utf-8") as _f:
+            _f.write(msg)
+    except Exception:
+        pass
+
+_diag_w(f"\n=== {datetime.datetime.now().isoformat()} INNER farmos meta ===\n")
+_diag_w(f"sys.executable = {sys.executable!r}\n")
+_diag_w(f"cwd            = {os.getcwd()!r}\n")
+_diag_w(f".env exists    = {os.path.exists('.env')!r}\n")
+for _k in ("DATABASE_URL", "VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
+    _diag_w(f"env[{_k}] = {os.environ.get(_k, '<unset>')!r}\n")
+
+try:
+    from app.core.config import settings as _s
+    _diag_w(f"settings.DATABASE_URL = {_s.DATABASE_URL!r}\n")
+except Exception:
+    _diag_w("settings load FAILED:\n" + traceback.format_exc())
+    raise
+
 import bootstrap.farmos_seed  # FarmOS 모델 등록
 from bootstrap.farmos_seed import EXPECTED_ROW_COUNTS, POST_PESTICIDE_MIN_ROW_COUNTS
 from bootstrap.seed_ai_agent import DEFAULT_DECISION_COUNT
@@ -132,7 +202,29 @@ sys.stdout.write(json.dumps(payload, ensure_ascii=False))
 
 SHOP_META_CODE = r"""
 import json
+import os
 import sys
+import datetime
+import traceback
+
+# [TEMP DIAG] Settings 로드 전 inner 환경 스냅샷.
+_DIAG = os.environ.get("FARMOS_DIAG_LOG")
+def _diag_w(msg):
+    if not _DIAG:
+        return
+    try:
+        with open(_DIAG, "a", encoding="utf-8") as _f:
+            _f.write(msg)
+    except Exception:
+        pass
+
+_diag_w(f"\n=== {datetime.datetime.now().isoformat()} INNER shop meta ===\n")
+_diag_w(f"sys.executable = {sys.executable!r}\n")
+_diag_w(f"cwd            = {os.getcwd()!r}\n")
+_diag_w(f".env exists    = {os.path.exists('.env')!r}\n")
+for _k in ("DATABASE_URL", "VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
+    _diag_w(f"env[{_k}] = {os.environ.get(_k, '<unset>')!r}\n")
+
 import bootstrap.shoppingmall_seed  # ShoppingMall 모델 등록
 from bootstrap.shoppingmall_seed import (
     EXPECTED_ROW_COUNTS,
@@ -182,6 +274,9 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
+
+    # [TEMP DIAG] 외부 진입점(export_meta.py 자체) 환경 스냅샷.
+    _diag_append("OUTER export_meta.py main() entry")
 
     farmos_meta = _run_meta_extractor(
         "FarmOS 메타 추출",

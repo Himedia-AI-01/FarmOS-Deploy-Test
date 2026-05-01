@@ -42,10 +42,7 @@ MAX_ANSWER_LENGTH = 1000
 # RAG 도구 — asyncio.gather로 병렬 실행 가능 (DB 세션 불필요)
 _RAG_TOOL_NAMES: frozenset[str] = frozenset({
     "search_faq",
-    "search_storage_guide",
-    "search_season_info",
     "search_policy",
-    "search_farm_info",
 })
 
 
@@ -108,6 +105,8 @@ class AgentResult:
     tools_used: list[str] = field(default_factory=list)
     trace: list[TraceStep] = field(default_factory=list)
     metrics: list[ToolMetricData] = field(default_factory=list)
+    # search_faq 도구가 인용한 FaqDoc DB ID 목록 (FaqCitation 저장에 사용)
+    cited_faq_ids: list[int] = field(default_factory=list)
 
 
 # ── 빈 결과 판별 ───────────────────────────────────────────────────────────────
@@ -208,7 +207,7 @@ class AgentExecutor:
         output_with_ctx = output_system + suffix
 
         # 요청마다 db/user_id를 클로저로 바인딩한 도구 생성
-        tools = build_cs_tools(self.rag, db, user_id)
+        tools, tool_ctx = build_cs_tools(self.rag, db, user_id)
         tool_map = {t.name: t for t in tools}
 
         # Primary + Fallback 체인 구성
@@ -222,10 +221,13 @@ class AgentExecutor:
             llm_with_tools = primary_with_tools
             output_llm = self.primary
 
-        return await self._run_single_pass(
+        result = await self._run_single_pass(
             llm_with_tools, output_llm, tool_map,
             user_message, history, input_with_ctx, output_with_ctx,
         )
+        # search_faq가 인용한 문서 ID를 결과에 주입 (FaqCitation 저장용)
+        result.cited_faq_ids = tool_ctx.cited_faq_ids
+        return result
 
     async def _run_single_pass(
         self,

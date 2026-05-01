@@ -3,11 +3,10 @@
 EMBED_PROVIDER 설정에 따라 ChromaDB 임베딩 함수를 반환합니다.
 
 지원 provider:
-  openrouter          — OpenRouter Embeddings API (PRIMARY_LLM_API_KEY 재사용, 추가 설정 불필요)
-  ollama              — 로컬 Ollama 서버 (OLLAMA_BASE_URL + OLLAMA_EMBED_MODEL 사용)
-  sentence_transformers — HuggingFace 모델 로컬 실행 (API 키·서버 불필요, uv add sentence-transformers만 필요)
+  sentence_transformers — HuggingFace 모델 로컬 실행 (API 키·서버 불필요, 기본값)
                           기본 모델: BAAI/bge-m3 (다국어·1024dim·8192 tok — 최초 실행 시 ~2.2GB 다운로드)
                           dense retrieval만 사용 (ChromaDB는 sparse/ColBERT 미지원)
+  openrouter          — OpenRouter Embeddings API (LITELLM_API_KEY 재사용, 추가 설정 불필요)
   openai              — OpenAI Embeddings API 또는 호환 엔드포인트 (EMBED_API_KEY 필요)
 
 ⚠️  시딩(seed_rag.py)과 쿼리(rag.py)는 반드시 동일한 provider + model을 사용해야 합니다.
@@ -31,21 +30,14 @@ def get_embedding_function():
     if provider == "openrouter":
         from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
         model = settings.embed_model or "openai/text-embedding-3-small"
-        # PRIMARY_LLM_API_KEY를 기본으로 재사용 — 별도 키 불필요
-        api_key = settings.embed_api_key or settings.primary_llm_api_key
+        # LITELLM_API_KEY를 기본으로 재사용 — 별도 키 불필요
+        api_key = settings.embed_api_key or settings.litellm_api_key
         if not api_key:
-            raise ValueError("openrouter requires a non-empty API key (EMBED_API_KEY 또는 PRIMARY_LLM_API_KEY)")
+            raise ValueError("openrouter requires a non-empty API key (EMBED_API_KEY 또는 LITELLM_API_KEY)")
         return OpenAIEmbeddingFunction(
             api_key=api_key,
             model_name=model,
             api_base=_OPENROUTER_BASE_URL,
-        )
-
-    elif provider == "ollama":
-        from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
-        return OllamaEmbeddingFunction(
-            url=f"{settings.ollama_base_url}/api/embeddings",
-            model_name=settings.ollama_embed_model,
         )
 
     elif provider == "sentence_transformers":

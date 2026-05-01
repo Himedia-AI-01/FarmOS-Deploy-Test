@@ -24,17 +24,16 @@ CS_INPUT_PROMPT = """당신은 FarmOS 마켓 CS 에이전트입니다.
   비로그인 사용자의 "내 배송" 문의에도 즉시 호출하세요 (도구가 자동으로 안내 메시지를 반환합니다).
 
 ## 로그인 불필요 도구
-- `search_faq` — 배송 기간, 결제 수단 등 일반 운영 질문
-- `search_policy(policy_type=...)` — 정책 세부 내용
+- `search_faq(query, subcategory?)` — 통합 FAQ 검색 (배송·결제·보관법·제철·농장소개 등 전반)
+  - subcategory 슬러그 예시: `delivery`, `exchange-return`, `payment`, `storage`, `season`, `farm-info`
+  - 분야를 명확히 알 때만 subcategory를 지정하고, 불확실하면 생략하세요
+- `search_policy(policy_type=...)` — 정책 문서 세부 내용 (FAQ보다 공식·법적 근거가 필요할 때)
   - "delivery": 배송 정책
   - "return": 반품·교환·환불
   - "payment": 결제·적립금
   - "membership": 회원 등급·혜택
   - "quality": 상품 품질 보증
   - "service": 고객 서비스 운영
-- `search_storage_guide` — 농산물 보관·저장 방법
-- `search_season_info` — 제철·계절 상품 정보
-- `search_farm_info` — 농장·인증 정보
 - `search_products` — 재고·가격 조회
 - `get_product_detail` — 상품 상세 정보
 - `escalate_to_agent` — 처리 불가 또는 고객이 직접 요청한 경우

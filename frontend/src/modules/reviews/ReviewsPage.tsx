@@ -17,7 +17,7 @@ export default function ReviewsPage() {
   useEffect(() => { setMounted(true); }, []);
 
   const {
-    analysis, isLoading, isAnalyzing, isEmbedding,
+    analysis, isAnalyzing, isEmbedding,
     embedProgress, analyzeProgress, progressMessage,
     error, analyzeReviews, searchResults, isSearching, searchReviews,
     trends, anomalies, downloadReport, embedReviews,

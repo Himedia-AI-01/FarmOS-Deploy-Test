@@ -63,6 +63,18 @@ class FakeRAGService:
                     docs.append(doc)
         return docs
 
+    def retrieve_with_metadata(
+        self,
+        question: str,
+        collection: str,
+        top_k: int = 3,
+        distance_threshold: float = 0.5,
+        where: dict | None = None,
+    ) -> list[tuple[str, dict]]:
+        """(doc_text, metadata) 튜플 목록 반환 — search_faq 도구용."""
+        docs = self._results.get(collection, [])[:top_k]
+        return [(doc, {"id": f"{collection}:{i}"}) for i, doc in enumerate(docs)]
+
     def hybrid_retrieve(
         self,
         question: str,
@@ -123,8 +135,16 @@ def make_mock_db(orders=None, shipments=None, products=None, chat_session=None):
     order_mock.filter.return_value.order_by.return_value.limit.return_value.all.return_value = (
         orders or []
     )
+    # filter().options().order_by().limit().all() → orders (base_query 경로: selectinload 포함)
+    order_mock.filter.return_value.options.return_value.order_by.return_value.limit.return_value.all.return_value = (
+        orders or []
+    )
     # filter().filter().order_by().limit().all() → orders (order_id 추가 필터)
     order_mock.filter.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = (
+        orders or []
+    )
+    # filter().options().filter().all() → orders (base_query + order_id 직접 필터)
+    order_mock.filter.return_value.options.return_value.filter.return_value.all.return_value = (
         orders or []
     )
     # filter().all() → orders (단순 조회)
@@ -163,7 +183,7 @@ def make_order(
     order_id=1,
     user_id=10,
     total_price=35000,
-    status="shipping",
+    status="shipped",
     created_at=None,
     items=None,
 ):

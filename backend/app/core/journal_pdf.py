@@ -2,11 +2,19 @@
 
 from datetime import date
 from itertools import groupby
+from pathlib import Path
 
 from fpdf import FPDF
 
 from app.core.config import settings
 from app.models.journal import JournalEntry
+
+# 번들 폰트 — `.env` 의 FONT_PATH 가 비어 있을 때 fallback 으로 사용.
+# config.py 의 default 도 동일 위치를 가리키지만 .env 에 빈 값이 있으면 default 가 무시되므로
+# 모듈 레벨에서도 명시 fallback 한다.
+_BUNDLED_FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+_DEFAULT_FONT = str(_BUNDLED_FONTS_DIR / "Pretendard-Regular.ttf")
+_DEFAULT_FONT_BOLD = str(_BUNDLED_FONTS_DIR / "Pretendard-Bold.ttf")
 
 # ── 색상 팔레트 ──
 
@@ -50,8 +58,11 @@ class JournalPDF(FPDF):
         self.date_to = date_to
         # 폰트 alias "malgun"은 기존 호환용으로 유지(실제 파일은 Pretendard 번들).
         # FONT_PATH / FONT_BOLD_PATH 각각 독립적으로 .env에서 오버라이드 가능.
-        self.add_font("malgun", "", settings.FONT_PATH, uni=True)
-        self.add_font("malgun", "B", settings.FONT_BOLD_PATH, uni=True)
+        # .env 에 빈 값이 들어있는 환경(.env.example 기본) 은 번들 폰트로 fallback.
+        font_path = settings.FONT_PATH or _DEFAULT_FONT
+        font_bold_path = settings.FONT_BOLD_PATH or _DEFAULT_FONT_BOLD
+        self.add_font("malgun", "", font_path, uni=True)
+        self.add_font("malgun", "B", font_bold_path, uni=True)
         self.set_auto_page_break(auto=False)
         self.set_margins(MARGIN, MARGIN, MARGIN)
 

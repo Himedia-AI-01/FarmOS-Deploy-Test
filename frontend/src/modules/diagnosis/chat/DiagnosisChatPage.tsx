@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useLocation, useNavigate, useParams, useParams as useReactRouterParams } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { MdSend, MdArrowBack, MdRefresh, MdSmartToy, MdPerson } from 'react-icons/md';
 import toast from 'react-hot-toast';
@@ -14,7 +14,7 @@ interface Message {
 }
 
 // 마크다운 렌더러 컴포넌트 (개선된 파서)
-function MarkdownRenderer({ content, isUser = false }: { content: string, isUser?: boolean }) {
+function MarkdownRenderer({ content }: { content: string, isUser?: boolean }) {
   const parseMarkdown = (text: string): string => {
     // DOMPurify가 소독을 담당하므로 수동 이스케이프를 제거하여 백엔드 HTML 태그 보존
     const formatInline = (value: string): string =>
@@ -40,7 +40,7 @@ function MarkdownRenderer({ content, isUser = false }: { content: string, isUser
     const BACKEND_ORIGIN = import.meta.env.VITE_BACKEND_ORIGIN || 'http://localhost:8000';
     const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
-    processedText = processedText.replace(/!\[(.*?)\]\((.*?)\)/g, (match, alt, url) => {
+    processedText = processedText.replace(/!\[(.*?)\]\((.*?)\)/g, (_match, alt, url) => {
       const fullUrl = url.startsWith('/uploads') ? `${BACKEND_ORIGIN}${url}` : url;
       return `<img src="${escapeAttr(fullUrl)}" alt="${escapeAttr(alt)}" class="rounded-xl max-w-full h-auto my-2 border border-gray-100 shadow-sm" />`;
     });
@@ -258,7 +258,6 @@ export default function DiagnosisChatPage() {
 
   // 1. 초기 컨텍스트 수신 (DiagnosisPage에서 보낸 데이터)
   const context = location.state?.diagnosisContext;
-  const isHistory = location.state?.fromHistory === true;
 
   // DB에서 채팅 내역 불러오기
   const fetchChatMessages = async () => {

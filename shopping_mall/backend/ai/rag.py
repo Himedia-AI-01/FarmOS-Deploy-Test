@@ -1,15 +1,28 @@
 """RAG (Retrieval-Augmented Generation) service using ChromaDB."""
 import logging
+import os
 import re
+import sys
 from typing import Optional
 
 import json as _json
 
+# Windows에서 torch OpenMP DLL 중복 로딩으로 인한 세그폴트 방지 (Windows 전용).
+# bge-m3(임베딩)와 CrossEncoder(리랭커)가 각각 torch를 로딩할 때 충돌이 발생하므로
+# 프로세스 시작 시점에 미리 설정해야 효과가 있다.
+if sys.platform.startswith("win"):
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from app.core.config import settings
 from app.paths import CHROMA_DB_PATH, AI_DATA_DIR
 from ai.embeddings import get_embedding_function
+from ai.utils import tokenize_ko
 
 logger = logging.getLogger(__name__)
+
+# ── 상수 ──────────────────────────────────────────────────────────────────────
+# BM25/Dense 각각 top_k의 2배 후보를 뽑아 RRF 통합 후 상위 top_k 반환
+_RRF_CANDIDATE_MULTIPLIER = 2
 
 # ── BM25 지연 로딩 ─────────────────────────────────────────────────────────────
 
@@ -59,8 +72,9 @@ _SYNONYM_MAP: dict[str, str] = {
     "포인트": "적립금",
     "마일리지": "적립금",
     "캔슬": "취소",
-    "며칠": "기간",
-    "얼마나": "기간",
+    # "며칠" / "얼마나" 는 의문부사 — 동의어가 아니므로 제거.
+    # bge-m3 시맨틱 임베딩이 자연스럽게 처리하며, 치환 시 문장 의미가 왜곡됨.
+    # 예) "배송까지 얼마나 걸리나요?" → "배송까지 기간 걸리나요?" (비문)
 }
 
 # 구어체 어미 제거 (문장 끝 패턴)
@@ -77,10 +91,20 @@ def normalize_query(query: str) -> str:
     3. 연속 공백 정리
 
     원본 의미 보존 우선 — 변환 결과가 빈 문자열이면 원본 반환.
+
+    Lookahead 설계:
+      기존 (?![가-힣a-zA-Z]) 는 '캔슬하고' 처럼 외래어 동사형(하+어미)이 붙으면 매칭 실패.
+      개선: 뒤가 비 한글/알파 OR '하'+한글(동사형 접미사) 일 때도 치환하도록 양성 lookahead 사용.
+      예) '캔슬하고 싶은데' → 취소하고 싶은데  /  '캔슬' → 취소
     """
     q = _COLLOQUIAL_ENDINGS.sub("", query.strip()).strip()
     for src, dst in _SYNONYM_MAP.items():
-        pattern = f"(?<![가-힣a-zA-Z]){re.escape(src)}(?![가-힣a-zA-Z])"
+        # 앞: 한글/알파 아님 (단어 경계)
+        # 뒤: 비한글/비알파 OR 동사 접미사 '하'+한글 OR 문자열 끝
+        pattern = (
+            f"(?<![가-힣a-zA-Z]){re.escape(src)}"
+            f"(?=[^가-힣a-zA-Z]|하[가-힣]|$)"
+        )
         q = re.sub(pattern, dst, q)
     q = re.sub(r"\s{2,}", " ", q).strip()
     return q or query
@@ -145,8 +169,13 @@ def _load_reranker(model_name: str):
         return _reranker_obj
     try:
         from sentence_transformers import CrossEncoder
-        logger.info("Reranker 로드 중: %s", model_name)
-        _reranker_obj = CrossEncoder(model_name)
+        import torch
+        # CPU를 명시적으로 지정 — GPU 없는 환경에서 CUDA 초기화 시도 방지.
+        # KMP_DUPLICATE_LIB_OK=TRUE (모듈 최상단 설정)가 OpenMP 충돌을 해결하므로
+        # torch.set_num_threads() 제한은 불필요. 기본 스레드 수를 유지해 추론 성능 확보.
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("Reranker 로드 중: %s (device=%s)", model_name, device)
+        _reranker_obj = CrossEncoder(model_name, device=device)
         _reranker_name = model_name
         logger.info("Reranker 로드 완료: %s", model_name)
         return _reranker_obj
@@ -322,6 +351,61 @@ class RAGService:
             logger.warning(f"RAG retrieve_with_scores failed (collection={collection}): {e}")
             return []
 
+    def retrieve_with_metadata(
+        self,
+        question: str,
+        collection: str,
+        top_k: int = 3,
+        distance_threshold: float = 0.5,
+        where: dict | None = None,
+    ) -> list[tuple[str, dict]]:
+        """ChromaDB에서 관련 문서를 검색하고 (텍스트, 메타데이터) 튜플 리스트로 반환.
+
+        FAQ 인용 추적에 필요한 db_id 등 메타데이터를 함께 반환합니다.
+
+        Args:
+            question: 검색 질문
+            collection: 컬렉션 이름
+            top_k: 최대 반환 수
+            distance_threshold: 이 값 미만의 거리(유사도)인 문서만 반환
+            where: 메타데이터 필터 (선택)
+
+        Returns:
+            [(doc_text, metadata_dict), ...] — distance 오름차순 정렬.
+            관련 문서 없으면 빈 리스트.
+        """
+        col = self._get_collection(collection)
+        if col is None:
+            return []
+
+        try:
+            kwargs: dict = {
+                "query_texts": [question],
+                "n_results": top_k,
+                "include": ["documents", "distances", "metadatas"],
+            }
+            if where:
+                kwargs["where"] = where
+
+            results = col.query(**kwargs)
+            documents = results.get("documents", [[]])[0]
+            distances = results.get("distances", [[]])[0]
+            metadatas = results.get("metadatas", [[]])[0]
+
+            filtered = sorted(
+                [
+                    (doc, meta or {}, dist)
+                    for doc, dist, meta in zip(documents, distances, metadatas)
+                    if dist < distance_threshold
+                ],
+                key=lambda x: x[2],
+            )
+            return [(doc, meta) for doc, meta, _ in filtered]
+
+        except Exception as e:
+            logger.warning(f"RAG retrieve_with_metadata failed (collection={collection}): {e}")
+            return []
+
     def retrieve_multiple(
         self,
         question: str,
@@ -380,7 +464,7 @@ class RAGService:
         seen: set[str] = set()
         for col_name in collections:
             for doc, dist in self.retrieve_with_scores(
-                question, col_name, top_k * 2, distance_threshold
+                question, col_name, top_k * _RRF_CANDIDATE_MULTIPLIER, distance_threshold
             ):
                 if doc not in seen:
                     seen.add(doc)
@@ -392,7 +476,7 @@ class RAGService:
         if bm25_obj is None:
             return [doc for doc, _ in dense[:top_k]]
 
-        tokens = re.findall(r"[가-힣a-zA-Z0-9]+", question.lower())
+        tokens = tokenize_ko(question)
         if not tokens:
             return [doc for doc, _ in dense[:top_k]]
 
@@ -404,7 +488,7 @@ class RAGService:
             if col in col_set
         ]
         valid.sort(key=lambda x: x[1], reverse=True)
-        top_bm25_ids = [bm25_meta["ids"][i] for i, _ in valid[:top_k * 2]]
+        top_bm25_ids = [bm25_meta["ids"][i] for i, _ in valid[:top_k * _RRF_CANDIDATE_MULTIPLIER]]
 
         # ChromaDB에서 BM25 상위 문서 텍스트 조회
         bm25_docs: list[str] = []

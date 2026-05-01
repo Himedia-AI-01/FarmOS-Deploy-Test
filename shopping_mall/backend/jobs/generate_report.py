@@ -3,6 +3,8 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
+from app.core.datetime_utils import now_kst
+
 from app.database import SessionLocal
 from app.services.ai_report import ReportService
 from ai.llm_client import LLMClient
@@ -14,10 +16,11 @@ def run():
     """Generate the weekly report for the previous week."""
     db = SessionLocal()
     try:
-        today = datetime.utcnow().date()
+        today = now_kst().date()
         # Previous week: Monday to Sunday
-        week_end = today - timedelta(days=today.weekday())  # This Monday
-        week_start = week_end - timedelta(days=7)
+        this_monday = today - timedelta(days=today.weekday())
+        week_end = this_monday - timedelta(days=1)   # Last Sunday
+        week_start = week_end - timedelta(days=6)    # Last Monday
 
         llm = LLMClient()
         service = ReportService(llm_client=llm)

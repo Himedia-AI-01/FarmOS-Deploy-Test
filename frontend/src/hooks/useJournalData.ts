@@ -3,11 +3,13 @@ import type {
   JournalEntryAPI,
   JournalListResponse,
   STTParseResult,
+  JournalPhotoParseResult,
   DailySummaryAPI,
   MissingFieldAlert,
 } from "@/types";
+import { downsampleImage } from "@/utils/imageDownsample";
+import { API_BASE } from "@/utils/api";
 
-const API_BASE = "http://localhost:8000/api/v1";
 const opts: RequestInit = { credentials: "include" };
 
 interface JournalFilters {
@@ -195,6 +197,94 @@ export function useJournalData() {
     [],
   );
 
+  const parsePhotos = useCallback(
+    async (
+      files: File[],
+      context?: { field_name?: string; crop?: string },
+      signal?: AbortSignal,
+    ): Promise<JournalPhotoParseResult> => {
+      try {
+        const form = new FormData();
+        files.forEach((f) => form.append("files", f));
+        if (context?.field_name) form.append("field_name", context.field_name);
+        if (context?.crop) form.append("crop", context.crop);
+        const res = await fetch(`${API_BASE}/journal/parse-photos`, {
+          ...opts,
+          method: "POST",
+          body: form,
+          signal,
+        });
+        if (!res.ok) {
+          let detail = `사진 분석 실패 (${res.status})`;
+          try {
+            const body = await res.json();
+            if (body?.detail) detail = String(body.detail);
+          } catch {
+            /* ignore */
+          }
+          return {
+            entries: [],
+            unparsed_text: "",
+            rejected: true,
+            reject_reason: detail,
+          };
+        }
+        return await res.json();
+      } catch (e) {
+        // AbortError 는 호출자가 명시적으로 취소한 것 — 그대로 throw 해서 caller 가
+        // silent 처리 가능하게.
+        if (e instanceof DOMException && e.name === "AbortError") {
+          throw e;
+        }
+        return {
+          entries: [],
+          unparsed_text: "",
+          rejected: true,
+          reject_reason: `네트워크 오류: ${(e as Error).message}`,
+        };
+      }
+    },
+    [],
+  );
+
+  const uploadPhoto = useCallback(
+    async (file: File, signal?: AbortSignal): Promise<number | null> => {
+      try {
+        // 큰 사진(스마트폰 12MP+) 은 BE max bytes(5MB) 초과 가능 → 다운샘플 적용
+        const downsampled = await downsampleImage(file);
+        const form = new FormData();
+        form.append("file", downsampled);
+        const res = await fetch(`${API_BASE}/journal/photos`, {
+          ...opts,
+          method: "POST",
+          body: form,
+          signal,
+        });
+        if (!res.ok) return null;
+        const json: { photo_id: number } = await res.json();
+        return json.photo_id;
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") {
+          throw e;
+        }
+        return null;
+      }
+    },
+    [],
+  );
+
+  const deletePhoto = useCallback(async (photoId: number): Promise<boolean> => {
+    try {
+      const res = await fetch(`${API_BASE}/journal/photos/${photoId}`, {
+        ...opts,
+        method: "DELETE",
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }, []);
+
   const fetchDailySummary = useCallback(
     async (date: string): Promise<DailySummaryAPI | null> => {
       try {
@@ -241,6 +331,9 @@ export function useJournalData() {
     deleteEntry,
     parseSTT,
     transcribeAudio,
+    parsePhotos,
+    uploadPhoto,
+    deletePhoto,
     fetchDailySummary,
     fetchMissingFields,
   };

@@ -17,9 +17,9 @@ class LLMClient:
         api_key: str | None = None,
         model: str | None = None,
     ):
-        self.base_url = (base_url or settings.utility_llm_base_url).rstrip("/")
-        self.api_key = api_key or settings.utility_llm_api_key
-        self.model = model or settings.utility_llm_model
+        self.base_url = (base_url or settings.litellm_url).rstrip("/")
+        self.api_key = api_key or settings.litellm_api_key
+        self.model = model or settings.litellm_model
 
     async def generate(self, prompt: str, system: str = "") -> str:
         """단일 프롬프트로 텍스트를 생성합니다. 실패 시 폴백 반환."""

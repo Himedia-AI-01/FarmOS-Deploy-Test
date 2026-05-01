@@ -5,7 +5,7 @@ import {
   forwardRef,
   useImperativeHandle,
 } from "react";
-import { MdMic, MdStop, MdAutorenew, MdClose } from "react-icons/md";
+import { MdMic, MdStop, MdClose } from "react-icons/md";
 import { motion, AnimatePresence } from "framer-motion";
 import type { STTParseResult } from "@/types";
 
@@ -54,7 +54,10 @@ const STTInput = forwardRef<STTInputHandle, Props>(function STTInput(
   const [status, setStatus] = useState<STTStatus>("idle");
   const [level, setLevel] = useState<number>(0); // 0~1
   const [elapsed, setElapsed] = useState<number>(0); // seconds
-  const [progress, setProgress] = useState<number>(0); // 0~100
+  // 진행률 보간 — 현재 UI 에 직접 바인딩되어 있지 않으므로 useState 가 아닌 useRef 로 보관.
+  // (state 로 두면 80ms 마다 setState → 리렌더가 발생해 무용 비용 증가.)
+  // 향후 진행률 표시 UI 가 추가되면 useState 로 환원하면 됨.
+  const progressRef = useRef<number>(0);
   const interpRef = useRef<number | null>(null);
 
   const stopInterp = useCallback(() => {
@@ -68,11 +71,11 @@ const STTInput = forwardRef<STTInputHandle, Props>(function STTInput(
   const startInterp = useCallback(
     (from: number, to: number, durationMs: number) => {
       stopInterp();
-      setProgress(from);
+      progressRef.current = from;
       const startAt = Date.now();
       interpRef.current = window.setInterval(() => {
         const t = Math.min(1, (Date.now() - startAt) / durationMs);
-        setProgress(from + (to - from) * t);
+        progressRef.current = from + (to - from) * t;
         if (t >= 1) stopInterp();
       }, 80);
     },
@@ -122,21 +125,21 @@ const STTInput = forwardRef<STTInputHandle, Props>(function STTInput(
         cancelledRef.current = false;
         // 1) STT 요청 → 응답
         setStatus("transcribing");
-        setProgress(10);
+        progressRef.current = 10;
         startInterp(15, 55, 12000);
         const text = await transcribeAudio(blob, sttContext);
         stopInterp();
         if (cancelledRef.current) {
-          setProgress(0);
+          progressRef.current = 0;
           setStatus("idle");
           return;
         }
         if (!text) {
-          setProgress(0);
+          progressRef.current = 0;
           setStatus("idle");
           return;
         }
-        setProgress(60);
+        progressRef.current = 60;
 
         // 2) LLM 파싱 요청 → 응답
         setStatus("parsing");
@@ -144,20 +147,20 @@ const STTInput = forwardRef<STTInputHandle, Props>(function STTInput(
         const result = await parseSTT(text, sttContext);
         stopInterp();
         if (cancelledRef.current) {
-          setProgress(0);
+          progressRef.current = 0;
           setStatus("idle");
           return;
         }
-        setProgress(100);
+        progressRef.current = 100;
 
         onParsed(result);
         setTimeout(() => {
-          setProgress(0);
+          progressRef.current = 0;
           setStatus("idle");
         }, 200);
       } catch (e) {
         stopInterp();
-        setProgress(0);
+        progressRef.current = 0;
         setStatus("idle");
         throw e;
       }
@@ -168,7 +171,7 @@ const STTInput = forwardRef<STTInputHandle, Props>(function STTInput(
   const handleBusyCancel = useCallback(() => {
     cancelledRef.current = true;
     stopInterp();
-    setProgress(0);
+    progressRef.current = 0;
     setStatus("idle");
   }, [stopInterp]);
 
