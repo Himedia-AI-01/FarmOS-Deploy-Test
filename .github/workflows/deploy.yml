@@ -102,8 +102,17 @@ jobs:
         working-directory: frontend
 
       - name: Build (tsc -b && vite build)
+        # VITE_* 변수 빌드 타임 주입 — 둘 다 빈 prefix 또는 상대 경로로 설정해
+        # 브라우저가 현재 호스트(EC2 IP/도메인) 기준으로 자동 해석되도록 함.
+        #   - VITE_API_BASE: REST API 호출 (frontend/src/utils/api.ts)
+        #   - VITE_BACKEND_ORIGIN: SSE 스트리밍 (frontend/src/modules/diagnosis/chat/DiagnosisChatPage.tsx)
+        # 둘 다 미주입 시 fallback 인 http://localhost:8000 이 dist/ 에 inline 되어
+        # 브라우저가 사용자 PC localhost 로 요청을 쏘게 됨 (실패).
         run: npm run build
         working-directory: frontend
+        env:
+          VITE_API_BASE: /api/v1
+          VITE_BACKEND_ORIGIN: ""
 
       - name: Upload frontend dist
         uses: actions/upload-artifact@v4
