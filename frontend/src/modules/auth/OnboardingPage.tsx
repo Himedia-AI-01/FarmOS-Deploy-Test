@@ -4,8 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useAuth } from '@/context/AuthContext';
 import { CROP_OPTIONS, FARMLAND_TYPES, FARMER_TYPES, safeAreaConvert } from '@/constants/farming';
-
-const API_BASE = 'http://localhost:8000/api/v1';
+import { API_BASE } from '@/utils/api';
 const STEP_LABELS = ['계정', '농장', '작물', '영농', '완료'];
 
 /* ────────────── 타입 ────────────── */

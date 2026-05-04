@@ -7,7 +7,9 @@
  *   GET  /api/v1/subsidy/detail/{code}      지원금 상세 정보
  */
 
-const API_BASE = 'http://localhost:8000/api/v1/subsidy';
+import { API_BASE as ROOT_API_BASE } from '@/utils/api';
+
+const API_BASE = `${ROOT_API_BASE}/subsidy`;
 
 export type EligibilityStatus = 'eligible' | 'ineligible' | 'needs_review';
 

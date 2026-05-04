@@ -1,6 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
-
-const API_BASE = 'http://localhost:8000/api/v1';
+import { API_BASE } from '@/utils/api';
 
 // Access token 만료 5분 전에 자동 갱신 (55분)
 const TOKEN_REFRESH_INTERVAL = 55 * 60 * 1000;

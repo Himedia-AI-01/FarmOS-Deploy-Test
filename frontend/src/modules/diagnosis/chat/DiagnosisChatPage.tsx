@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { MdSend, MdArrowBack, MdRefresh, MdSmartToy, MdPerson } from 'react-icons/md';
 import toast from 'react-hot-toast';
 import DOMPurify from 'dompurify';
+import { API_BASE as ROOT_API_BASE } from '@/utils/api';
 
 interface Message {
   id: string;
@@ -37,7 +38,7 @@ function MarkdownRenderer({ content }: { content: string, isUser?: boolean }) {
       .replace(/^-\s+-\s+/gm, '  - ');
 
     // 💡 이미지 마크다운 지원 개선: 백그라운드 주소 자동 연결 및 XSS 방어 강화
-    const BACKEND_ORIGIN = import.meta.env.VITE_BACKEND_ORIGIN || 'http://localhost:8000';
+    const BACKEND_ORIGIN = (import.meta.env as Record<string, string | undefined>).VITE_BACKEND_ORIGIN ?? '';
     const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
     processedText = processedText.replace(/!\[(.*?)\]\((.*?)\)/g, (_match, alt, url) => {
@@ -254,7 +255,7 @@ export default function DiagnosisChatPage() {
   const [isLoading, setIsLoading] = useState(false);
 
   // API 호출 베이스 경로
-  const API_BASE = 'http://localhost:8000/api/v1/diagnosis';
+  const API_BASE = `${ROOT_API_BASE}/diagnosis`;
 
   // 1. 초기 컨텍스트 수신 (DiagnosisPage에서 보낸 데이터)
   const context = location.state?.diagnosisContext;

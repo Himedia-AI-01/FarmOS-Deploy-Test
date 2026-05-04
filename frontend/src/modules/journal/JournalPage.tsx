@@ -10,6 +10,7 @@ import {
 } from "react-icons/md";
 import toast from "react-hot-toast";
 import { useJournalData } from "@/hooks/useJournalData";
+import { API_BASE } from "@/utils/api";
 import JournalEntryForm, {
   type JournalEntryFormHandle,
 } from "./JournalEntryForm";
@@ -287,7 +288,7 @@ export default function JournalPage() {
     // window.open은 새 탭에서 쿠키 SameSite로 인증 실패할 수 있어 fetch+blob 사용.
     const today = toLocalDateString();
     const dateFrom = `${new Date().getFullYear()}-01-01`;
-    const url = `http://localhost:8000/api/v1/daily-journal/export-pdf?date_from=${dateFrom}&date_to=${today}`;
+    const url = `${API_BASE}/daily-journal/export-pdf?date_from=${dateFrom}&date_to=${today}`;
     try {
       const res = await fetch(url, { credentials: "include" });
       if (!res.ok) {

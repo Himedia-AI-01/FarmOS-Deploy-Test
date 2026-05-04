@@ -4,8 +4,7 @@ import type {
   DailyJournalRevisionAPI,
   DailyJournalNarrativeSource,
 } from "@/types";
-
-const API_BASE = "http://localhost:8000/api/v1";
+import { API_BASE } from "@/utils/api";
 const opts: RequestInit = { credentials: "include" };
 
 /** 서버에서 내려오는 에러 응답 본문 형태 (라우터에서 detail={code, message}로 감싸서 내려줌). */

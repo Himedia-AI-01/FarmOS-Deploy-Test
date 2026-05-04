@@ -1,7 +1,6 @@
 import { useState, useCallback } from 'react';
 import type { KamisItemPrice } from '@/types';
-
-const API_BASE = 'http://localhost:8000/api/v1';
+import { API_BASE } from '@/utils/api';
 
 interface MarketData {
   latestPrices: KamisItemPrice[];

@@ -6,8 +6,7 @@ import { CROP_OPTIONS, FARMLAND_TYPES, FARMER_TYPES, safeAreaConvert } from '@/c
 import DaumPostcode from 'react-daum-postcode';
 import { MdSearch } from 'react-icons/md';
 import { formatDaumAddress, type DaumPostcodeData } from '@/utils/daumAddress';
-
-const API_BASE = 'http://localhost:8000/api/v1';
+import { API_BASE } from '@/utils/api';
 
 /* ────────────── 타입 ────────────── */
 interface ProfileData {

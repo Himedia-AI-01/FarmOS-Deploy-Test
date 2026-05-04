@@ -18,7 +18,8 @@
 | B | **미사용 import/변수 (TS6133)** | 9 | 🟢 Minor | [02-unused-imports.md](./02-unused-imports.md) |
 | C | **Recharts v3 타입 호환 (TS2322)** | 2 | 🟡 Major | [03-recharts-v3-formatter.md](./03-recharts-v3-formatter.md) |
 | D | **Literal Union 캐스팅 (TS2345)** | 1 | 🟢 Minor | [04-journal-literal-union.md](./04-journal-literal-union.md) |
-| **합계** | | **18** | | |
+| **TS 빌드 합계** | | **18** | | |
+| E | **API_BASE 하드코딩 분산** (런타임 검증 중 발견) | 17 파일 | 🔴 Critical | [05-hardcoded-api-base.md](./05-hardcoded-api-base.md) |
 
 ---
 

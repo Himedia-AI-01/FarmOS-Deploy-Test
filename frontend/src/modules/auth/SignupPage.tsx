@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import toast from 'react-hot-toast';
-
-const API_BASE = 'http://localhost:8000/api/v1';
+import { API_BASE } from '@/utils/api';
 
 export default function SignupPage() {
   const navigate = useNavigate();

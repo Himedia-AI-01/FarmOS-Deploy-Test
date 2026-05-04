@@ -102,17 +102,33 @@ jobs:
         working-directory: frontend
 
       - name: Build (tsc -b && vite build)
-        # VITE_* 변수 빌드 타임 주입 — 둘 다 빈 prefix 또는 상대 경로로 설정해
-        # 브라우저가 현재 호스트(EC2 IP/도메인) 기준으로 자동 해석되도록 함.
-        #   - VITE_API_BASE: REST API 호출 (frontend/src/utils/api.ts)
-        #   - VITE_BACKEND_ORIGIN: SSE 스트리밍 (frontend/src/modules/diagnosis/chat/DiagnosisChatPage.tsx)
-        # 둘 다 미주입 시 fallback 인 http://localhost:8000 이 dist/ 에 inline 되어
-        # 브라우저가 사용자 PC localhost 로 요청을 쏘게 됨 (실패).
+        # VITE_* 변수 빌드 타임 주입 — frontend/src/utils/api.ts 의 fallback 회피용.
+        # (단, 18개 파일에 'http://localhost:8000/api/v1' 가 하드코딩되어 있어
+        #  VITE_ 만으로는 충분치 않음. 다음 step 의 sed 패치로 보완.)
         run: npm run build
         working-directory: frontend
         env:
           VITE_API_BASE: /api/v1
           VITE_BACKEND_ORIGIN: ""
+
+      # ─── 임시 패치 (메인 저장소 수정 전까지) ───
+      # 18개 파일에 하드코딩된 'http://localhost:8000/api/v1' → '/api/v1' (상대경로) 일괄 치환.
+      # 메인 저장소(`farmos-poc`) 의 src/ 가 utils/api.ts 의 API_BASE 를 import 하도록 리팩터되면
+      # 본 step 은 제거. plz-fix/ 폴더에 가이드 별도 정리 권장.
+      - name: Patch hardcoded localhost URLs in dist (temporary)
+        run: |
+          echo "Before patch:"
+          grep -c "http://localhost:8000/api/v1" frontend/dist/assets/*.js 2>/dev/null || echo "(no localhost found)"
+
+          find frontend/dist -type f \( -name "*.js" -o -name "*.html" \) \
+            -exec sed -i 's|http://localhost:8000/api/v1|/api/v1|g' {} \;
+
+          echo "After patch:"
+          grep -c "http://localhost:8000/api/v1" frontend/dist/assets/*.js 2>/dev/null || echo "(0 - patched successfully)"
+
+          # IoT 도메인은 그대로 유지 (외부 IoT relay 서버 — 별도 배포)
+          echo "IoT relay (untouched):"
+          grep -c "iot.lilpa.moe" frontend/dist/assets/*.js 2>/dev/null || echo "(no iot domain)"
 
       - name: Upload frontend dist
         uses: actions/upload-artifact@v4
