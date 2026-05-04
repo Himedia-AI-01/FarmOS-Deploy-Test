@@ -19,6 +19,8 @@ from .prompts import (
     CANCEL_REASON_MAP,
     EXCHANGE_REASON_MAP,
     REFUND_METHOD_MAP,
+    CHANGE_TYPE_MAP,
+    CHANGE_DETAIL_GUIDES,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,14 @@ logger = logging.getLogger(__name__)
 CANCELLABLE_STATUSES: frozenset[str] = frozenset({"pending", "preparing"})
 # 교환 가능 상태: 수령 완료된 주문
 EXCHANGEABLE_STATUSES: frozenset[str] = frozenset({"delivered"})
+# 주문 변경 가능 상태: 배송 전 주문
+CHANGEABLE_STATUSES: frozenset[str] = frozenset({"pending", "preparing"})
+HIGH_VALUE_REVIEW_THRESHOLD = 50_000
+HIGH_VALUE_REVIEW_FLAG: dict[str, str] = {
+    "code": "high_value_review",
+    "label": "5만원 이상 운영팀 우선 확인",
+    "severity": "warning",
+}
 
 _STATUS_DISPLAY: dict[str, str] = {
     "pending":   "주문 접수",
@@ -38,6 +48,8 @@ _STATUS_DISPLAY: dict[str, str] = {
     "delivered": "배송 완료",
     "cancelled": "취소 완료",
     "returned":  "반품 완료",
+    "paid":      "결제 완료",
+    "registered": "배송 준비 중",
 }
 
 
@@ -74,6 +86,14 @@ def _is_flow_abort_intent(text: str, action: str) -> bool:
 def _is_confirm_intent(text: str) -> bool:
     text_lower = text.strip().lower()
     return any(kw in text_lower for kw in CONFIRM_KEYWORDS)
+
+
+def _action_label(action: str) -> str:
+    return {
+        "cancel": "취소",
+        "exchange": "교환",
+        "change": "변경",
+    }.get(action, "처리")
 
 
 def _build_order_summaries(db, orders: list) -> dict[int, str]:
@@ -156,6 +176,17 @@ def _parse_reason(text: str, reason_map: dict[str, str]) -> str:
     return text[:_MAX_REASON_LENGTH] if text else "기타"
 
 
+_SIMPLE_CHANGE_OF_MIND_TERMS: frozenset[str] = frozenset(
+    {"단순 변심", "단순변심", "마음이 바뀌", "변심", "그냥", "필요 없어", "필요없어"}
+)
+
+
+def _is_simple_change_of_mind(reason: str) -> bool:
+    """신선 농산물 교환 불가 사유인 단순 변심 여부를 보수적으로 감지한다."""
+    normalized = reason.strip().lower()
+    return any(term in normalized for term in _SIMPLE_CHANGE_OF_MIND_TERMS)
+
+
 def _parse_refund_method(text: str) -> str:
     text = text.strip()
     if text in REFUND_METHOD_MAP:
@@ -165,6 +196,65 @@ def _parse_refund_method(text: str) -> str:
     if "2" in text or "적립" in text or "포인트" in text:
         return REFUND_METHOD_MAP["2"]
     return REFUND_METHOD_MAP["1"]  # 기본값
+
+
+def _parse_change_type(text: str) -> str:
+    text = text.strip()
+    if text in CHANGE_TYPE_MAP:
+        return CHANGE_TYPE_MAP[text]
+    m = re.match(r"^(\d+)", text)
+    if m and m.group(1) in CHANGE_TYPE_MAP:
+        return CHANGE_TYPE_MAP[m.group(1)]
+    for label in CHANGE_TYPE_MAP.values():
+        if label in text:
+            return label
+    return CHANGE_TYPE_MAP["5"]
+
+
+def _get_change_current_value(db, state: OrderState, change_type: str) -> str:
+    """주문 변경 입력창에 미리 채울 현재 등록값을 조회한다."""
+    from app.models.order import Order, OrderItem
+    from app.models.product import Product
+    from app.models.user import User
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == state.get("order_id"), Order.user_id == state.get("user_id"))
+        .first()
+    )
+    user = db.query(User).filter(User.id == state.get("user_id")).first()
+
+    if change_type == "배송지 변경":
+        return (
+            getattr(order, "shipping_address", None)
+            or getattr(user, "address", None)
+            or "등록된 배송지가 없습니다."
+        )
+
+    if change_type == "연락처 변경":
+        return getattr(user, "phone", None) or "등록된 연락처가 없습니다."
+
+    if change_type == "배송 요청사항 변경":
+        return "등록된 배송 요청사항이 없습니다."
+
+    if change_type == "상품 수량 변경":
+        order_items = (
+            db.query(OrderItem)
+            .filter(OrderItem.order_id == state.get("order_id"))
+            .all()
+        )
+        if not order_items:
+            return "등록된 주문 상품이 없습니다."
+
+        product_ids = {item.product_id for item in order_items}
+        products = db.query(Product).filter(Product.id.in_(product_ids)).all()
+        product_names = {p.id: p.name for p in products}
+        return "\n".join(
+            f"{product_names.get(item.product_id, '상품')} {item.quantity}개"
+            for item in order_items
+        )
+
+    return ""
 
 
 # "N번 [상품] [M개]" — 품목 인덱스는 "번"으로 명시적으로 구분,
@@ -217,26 +307,33 @@ def _parse_item_selections(user_input: str, order_items: list, db) -> list:
 # ── 노드 함수 ─────────────────────────────────────────────────────────────────
 
 async def route_action(state: OrderState, config: RunnableConfig) -> dict:
-    """취소/교환 분기 라우팅용 passthrough 노드."""
+    """취소/교환/주문 변경 분기 라우팅용 passthrough 노드."""
     return state
 
 
 async def list_orders(state: OrderState, config: RunnableConfig) -> dict:
-    """취소/교환 가능한 주문 목록 조회 → interrupt로 선택 대기.
+    """취소/교환/변경 가능한 주문 목록 조회 → interrupt로 선택 대기.
 
     - 취소: pending / preparing 상태만 (배송 픽업 전)
     - 교환: delivered 상태만 (수령 완료)
+    - 변경: pending / preparing 상태만 (배송 픽업 전)
     """
     from app.models.order import Order
 
     db = _get_db(config)
 
-    eligible_statuses = (
-        CANCELLABLE_STATUSES if state["action"] == "cancel" else EXCHANGEABLE_STATUSES
-    )
-    no_orders_key = (
-        "no_cancellable_orders" if state["action"] == "cancel" else "no_exchangeable_orders"
-    )
+    if state["action"] == "cancel":
+        eligible_statuses = CANCELLABLE_STATUSES
+        no_orders_key = "no_cancellable_orders"
+        prompt_key = "select_order_cancel"
+    elif state["action"] == "change":
+        eligible_statuses = CHANGEABLE_STATUSES
+        no_orders_key = "no_changeable_orders"
+        prompt_key = "select_order_change"
+    else:
+        eligible_statuses = EXCHANGEABLE_STATUSES
+        no_orders_key = "no_exchangeable_orders"
+        prompt_key = "select_order_exchange"
 
     orders = (
         db.query(Order)
@@ -271,7 +368,6 @@ async def list_orders(state: OrderState, config: RunnableConfig) -> dict:
         )
     order_list = "\n\n".join(order_lines)
 
-    prompt_key = "select_order_cancel" if state["action"] == "cancel" else "select_order_exchange"
     prompt = ORDER_PROMPTS[prompt_key].format(order_list=order_list)
 
     # ── interrupt: 사용자 주문 선택 대기 ──────────────────────────────────
@@ -424,6 +520,14 @@ async def get_reason(state: OrderState, config: RunnableConfig) -> dict:
         return {**state, "abort": True, "response": ORDER_PROMPTS["flow_cancelled"], "is_pending": False}
 
     reason = _parse_reason(user_input, reason_map)
+    if state["action"] == "exchange" and _is_simple_change_of_mind(reason):
+        return {
+            **state,
+            "abort": True,
+            "reason": reason,
+            "response": ORDER_PROMPTS["exchange_simple_change_rejected"],
+            "is_pending": False,
+        }
     return {**state, "reason": reason}
 
 
@@ -439,6 +543,40 @@ async def get_refund_method(state: OrderState, config: RunnableConfig) -> dict:
 
     refund_method = _parse_refund_method(user_input)
     return {**state, "refund_method": refund_method}
+
+
+async def get_change_type(state: OrderState, config: RunnableConfig) -> dict:
+    """주문 변경 유형 선택 → interrupt."""
+    prompt = ORDER_PROMPTS["change_type"]
+
+    user_input = interrupt(prompt)
+
+    if _is_flow_abort_intent(user_input, state["action"]):
+        return {**state, "abort": True, "response": ORDER_PROMPTS["flow_cancelled"], "is_pending": False}
+
+    change_type = _parse_change_type(user_input)
+    return {**state, "change_type": change_type}
+
+
+async def get_change_detail(state: OrderState, config: RunnableConfig) -> dict:
+    """주문 변경 상세 내용 입력 → interrupt."""
+    db = _get_db(config)
+    change_type = state.get("change_type") or CHANGE_TYPE_MAP["5"]
+    guide = CHANGE_DETAIL_GUIDES.get(change_type, CHANGE_DETAIL_GUIDES["기타 변경"])
+    current_value = _get_change_current_value(db, state, change_type)
+    prompt = ORDER_PROMPTS["change_detail"].format(
+        change_type=change_type,
+        current_value=current_value,
+        guide=guide,
+    )
+
+    user_input = interrupt(prompt)
+
+    if _is_flow_abort_intent(user_input, state["action"]):
+        return {**state, "abort": True, "response": ORDER_PROMPTS["flow_cancelled"], "is_pending": False}
+
+    detail = user_input.strip()[:_MAX_REASON_LENGTH] if user_input.strip() else "상세 내용 미입력"
+    return {**state, "change_detail": detail}
 
 
 _MAX_CONFIRMATION_ATTEMPTS = 3
@@ -469,6 +607,12 @@ async def show_summary(state: OrderState, config: RunnableConfig) -> dict:
             order_display=state.get("order_display", ""),
             reason=state.get("reason", ""),
             refund_method=state.get("refund_method", "원결제 수단 환불"),
+        )
+    elif state["action"] == "change":
+        prompt = ORDER_PROMPTS["change_summary"].format(
+            order_display=state.get("order_display", ""),
+            change_type=state.get("change_type", "기타 변경"),
+            change_detail=state.get("change_detail", ""),
         )
     else:
         items_display = "\n".join(
@@ -503,9 +647,9 @@ async def create_ticket(state: OrderState, config: RunnableConfig) -> dict:
       → 단일 트랜잭션 commit
       → 응답: auto_cancelled
 
-    배송 중 취소 또는 교환 접수:
+    배송 중 취소, 교환 접수, 주문 변경 요청:
       → ticket.status=received 유지 (관리자 검토 대기)
-      → 응답: admin_pending_cancel / ticket_created
+      → 응답: admin_pending_cancel / ticket_created / change_ticket_created
     """
     from app.models.ticket import ShopTicket
     from app.models.order import Order
@@ -526,13 +670,18 @@ async def create_ticket(state: OrderState, config: RunnableConfig) -> dict:
         return {**state, "response": "주문 정보를 확인할 수 없습니다.", "is_pending": False}
 
     # 상태 재검증 — interrupt 대기 중 주문 상태가 변경되었을 수 있음 (defense-in-depth)
-    eligible = CANCELLABLE_STATUSES if state["action"] == "cancel" else EXCHANGEABLE_STATUSES
+    if state["action"] == "cancel":
+        eligible = CANCELLABLE_STATUSES
+    elif state["action"] == "change":
+        eligible = CHANGEABLE_STATUSES
+    else:
+        eligible = EXCHANGEABLE_STATUSES
     if order.status not in eligible:
         logger.warning(
             "[order_graph] 상태 재검증 실패: user=%s order=%s status=%s action=%s",
             state["user_id"], state["order_id"], order.status, state["action"],
         )
-        action_ko = "취소" if state["action"] == "cancel" else "교환"
+        action_ko = _action_label(state["action"])
         status_display = _STATUS_DISPLAY.get(order.status, order.status)
         return {
             **state,
@@ -553,7 +702,7 @@ async def create_ticket(state: OrderState, config: RunnableConfig) -> dict:
             "[order_graph] 기존 티켓 재사용: #%s user=%s action=%s order=%s",
             existing.id, state["user_id"], state["action"], state["order_id"],
         )
-        action_ko = "취소" if state["action"] == "cancel" else "교환"
+        action_ko = _action_label(state["action"])
         response = ORDER_PROMPTS["ticket_unchanged"].format(
             action=action_ko, ticket_id=existing.id
         )
@@ -565,16 +714,29 @@ async def create_ticket(state: OrderState, config: RunnableConfig) -> dict:
         and order.status in AUTO_CANCEL_STATUSES
     )
 
-    items_json = json.dumps(state.get("selected_items", []), ensure_ascii=False) or None
+    items_payload = state.get("selected_items", [])
+    if state["action"] == "change":
+        items_payload = [{
+            "change_type": state.get("change_type"),
+            "change_detail": state.get("change_detail"),
+        }]
+    items_json = json.dumps(items_payload, ensure_ascii=False) if items_payload else None
+    ticket_flags: list[dict[str, str]] = []
+    if (
+        state["action"] == "exchange"
+        and getattr(order, "total_price", 0) >= HIGH_VALUE_REVIEW_THRESHOLD
+    ):
+        ticket_flags.append(HIGH_VALUE_REVIEW_FLAG)
 
     ticket = ShopTicket(
         user_id=state["user_id"],
         session_id=state.get("session_id"),
         order_id=state["order_id"],
         action_type=state["action"],
-        reason=state.get("reason") or "기타",
+        reason=state.get("reason") or state.get("change_type") or "기타",
         refund_method=state.get("refund_method"),
-        items=items_json if state["action"] == "exchange" else None,
+        items=items_json if state["action"] in {"exchange", "change"} else None,
+        flags=json.dumps(ticket_flags, ensure_ascii=False),
         status="received",
     )
     db.add(ticket)
@@ -609,6 +771,10 @@ async def create_ticket(state: OrderState, config: RunnableConfig) -> dict:
     elif state["action"] == "cancel":
         # 배송 중 취소 — 관리자 검토 대기
         response = ORDER_PROMPTS["admin_pending_cancel"].format(ticket_id=ticket.id)
+    elif state["action"] == "change":
+        response = ORDER_PROMPTS["change_ticket_created"].format(ticket_id=ticket.id)
+    elif ticket_flags:
+        response = ORDER_PROMPTS["ticket_created_high_value"].format(ticket_id=ticket.id)
     else:
         # 교환 접수
         response = ORDER_PROMPTS["ticket_created"].format(ticket_id=ticket.id)
@@ -629,7 +795,11 @@ def route_after_list_orders(state: OrderState) -> str:
     """list_orders 이후 분기."""
     if state.get("abort"):
         return "handle_flow_cancel"
-    return "select_items" if state["action"] == "exchange" else "get_reason"
+    if state["action"] == "exchange":
+        return "select_items"
+    if state["action"] == "change":
+        return "get_change_type"
+    return "get_reason"
 
 
 def route_after_get_reason(state: OrderState) -> str:

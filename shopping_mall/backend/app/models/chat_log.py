@@ -14,7 +14,6 @@ class ChatLog(Base):
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     escalated: Mapped[bool] = mapped_column(Boolean, default=False)
-    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=func.now())
 
     user = relationship("User", foreign_keys=[user_id])

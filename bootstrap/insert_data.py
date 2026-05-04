@@ -8,11 +8,16 @@ NodeJS 자동화 스크립트가 인자 없이 호출한다:
    `seed_farmos_users()` + `seed_ncpms()` + `seed_ai_agent()`.
 2. ShoppingMall backend venv 로 subprocess 분기 →
    `seed_shoppingmall()` + `seed_shoppingmall_reviews()`.
+3. ShoppingMall backend venv 로 subprocess 분기 →
+   `migrate_json_to_faq_v2.py` (FaqCategory + FaqDoc DB 적재, 멱등).
+4. ShoppingMall backend venv 로 subprocess 분기 →
+   `ai/seed_rag.py --from-db` (ChromaDB + BM25 인덱스 빌드, DB 기반).
 
 `bootstrap/create_tables.py` 와 같은 이유로 두 backend 를 subprocess 로 분리한다.
 
 이 모듈은 어떤 파괴적 동작(DROP/TRUNCATE/DELETE/ALTER)도 수행하지 않는다.
 모든 INSERT 는 ON CONFLICT DO NOTHING/UPDATE 또는 row 수 가드로 멱등 보장.
+(단, seed_rag.py 는 ChromaDB 디렉터리를 초기화한 뒤 재적재한다.)
 
 농약 RAG 데이터(rag_pesticide_*)는 자동화에서 제외 — JSON raw 가 git 미포함.
 필요 시 `bootstrap/Old_BootStrapBackup/pesticide.py` 풀 ETL 을 수동 실행.
@@ -41,6 +46,36 @@ def _run_python_code(label: str, python_exe: str, cwd: Path, code: str) -> None:
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
 
     result = subprocess.run([python_exe, "-c", code], cwd=str(cwd), env=env)
+    if result.returncode != 0:
+        print(
+            f"[insert_data] {label} 실패 (exit={result.returncode})",
+            file=sys.stderr,
+        )
+        raise SystemExit(result.returncode)
+    print(f"[insert_data] {label} 완료")
+
+
+def _run_python_script(
+    label: str,
+    python_exe: str,
+    cwd: Path,
+    script: str,
+    args: list[str] | None = None,
+) -> None:
+    """스크립트 파일을 직접 실행한다.
+
+    ``__file__`` 기반 sys.path 보정이 있는 스크립트는 ``-c code`` 방식으로
+    실행하면 ``__file__`` 이 정의되지 않아 경로 보정에 실패한다.
+    이 경우 스크립트 경로를 직접 넘겨 실행한다.
+    """
+    print(f"[insert_data] {label} 시작 (python={python_exe})")
+    env = os.environ.copy()
+    pythonpath_parts = [str(ROOT)]
+    if existing := env.get("PYTHONPATH"):
+        pythonpath_parts.append(existing)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+
+    result = subprocess.run([python_exe, script, *(args or [])], cwd=str(cwd), env=env)
     if result.returncode != 0:
         print(
             f"[insert_data] {label} 실패 (exit={result.returncode})",
@@ -88,7 +123,6 @@ added_reviews = seed_shoppingmall_reviews()
 print(f"[insert_data] seed_shoppingmall_reviews 추가 row: {added_reviews}")
 """
 
-
 def main() -> int:
     print("[insert_data] Phase 2 시작 (더미 데이터 INSERT, 멱등)")
 
@@ -104,6 +138,21 @@ def main() -> int:
         _venv_python(SHOP_BACKEND),
         SHOP_BACKEND,
         SHOP_SEED_CODE,
+    )
+
+    _run_python_script(
+        "ShoppingMall FAQ DB 시딩 (FaqCategory + FaqDoc)",
+        _venv_python(SHOP_BACKEND),
+        SHOP_BACKEND,
+        "scripts/migrate_json_to_faq_v2.py",
+    )
+
+    _run_python_script(
+        "ShoppingMall RAG 전체 시딩 (FAQ + 정책 문서 → ChromaDB + BM25)",
+        _venv_python(SHOP_BACKEND),
+        SHOP_BACKEND,
+        "ai/seed_rag.py",
+        ["--from-db"],
     )
 
     print("[insert_data] Phase 2 완료")

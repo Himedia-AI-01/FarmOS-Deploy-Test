@@ -4,7 +4,9 @@ from __future__ import annotations  # must be the very first statement
 # bge-m3 임베딩 + CrossEncoder 리랭커가 각각 torch를 로딩할 때 libiomp5md.dll 충돌 발생
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-os.environ["OMP_NUM_THREADS"] = "1"   # OpenMP 스레드 단일화 → DLL 충돌 원천 차단
+os.environ["OMP_NUM_THREADS"] = "1"        # OpenMP 스레드 단일화 → DLL 충돌 원천 차단
+os.environ["MKL_NUM_THREADS"] = "1"        # MKL 스레드 단일화
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # HuggingFace tokenizer 병렬 비활성화
 
 """RAG 파이프라인 성능 평가 스크립트 v2 — cs_tools 레벨.
 
@@ -200,6 +202,132 @@ GOLDEN_SET: list[GoldenItem] = [
         keywords=["웰컴", "3,000원"],
         query_type="sparse_match",
     ),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # CLAUSE_NUMBER  (5개) — 조항 번호(제N조)를 직접 언급
+    #   실제 문서에 제N조 구조 존재 → BM25 exact-match가 해당 조항 청크를 상위로 올려야 함
+    #   Dense는 조항 번호 자체를 의미 단위로 처리하지 못해 오탐 발생 가능
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # 반품교환환불정책 제2조 — 반품·교환 불가 사유 조항
+    GoldenItem(
+        query="반품 교환 정책 제2조 내용이 뭐예요?",
+        tool="search_policy", tool_args={"policy_type": "return"},
+        keywords=["7일", "신선 채소"],
+        query_type="clause_number",
+    ),
+    # 배송정책 제3조 — 배송비 기준 조항
+    GoldenItem(
+        query="배송 정책 제3조 배송비 알려줘",
+        tool="search_policy", tool_args={"policy_type": "delivery"},
+        keywords=["3,000원", "5만원"],
+        query_type="clause_number",
+    ),
+    # 주문결제정책 제2조 — 주문 취소 가능 시간 조항
+    GoldenItem(
+        query="주문 결제 정책 제2조가 어떻게 돼요?",
+        tool="search_policy", tool_args={"policy_type": "payment"},
+        keywords=["출고 전", "1시간"],
+        query_type="clause_number",
+    ),
+    # 품질보증정책 제3조 — 보증 기간 조항
+    GoldenItem(
+        query="상품 품질 보증 정책 제3조 보증 기간 알려줘",
+        tool="search_policy", tool_args={"policy_type": "quality"},
+        keywords=["보증 기간", "수령"],
+        query_type="clause_number",
+    ),
+    # 회원정책 제2조 — 회원 탈퇴 조항
+    GoldenItem(
+        query="회원 정책 제2조 탈퇴 규정이 뭐예요?",
+        tool="search_policy", tool_args={"policy_type": "membership"},
+        keywords=["30일", "탈퇴"],
+        query_type="clause_number",
+    ),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STATUS_VALUE  (5개) — 주문 상태값·정책 조건명을 포함한 질문
+    #   정확한 상태 문자열("출고 전", "냉장 배송", "황금 회원" 등)이 쿼리에 등장
+    #   BM25 exact-match가 해당 청크를 rank 1으로 올려야 함
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # 상태값: "출고 전" — 주문 취소 가능 조건
+    GoldenItem(
+        query="출고 전이면 취소할 수 있나요?",
+        tool="search_policy", tool_args={"policy_type": "payment"},
+        keywords=["출고 전", "취소"],
+        query_type="status_value",
+    ),
+    # 상태값: "냉장 배송" — 신선식품 추가 배송비 조건
+    GoldenItem(
+        query="냉장 배송이면 추가 배송비 얼마예요?",
+        tool="search_policy", tool_args={"policy_type": "delivery"},
+        keywords=["냉장", "1,000원"],
+        query_type="status_value",
+    ),
+    # 조건명: "부분 반품" — 묶음 상품 일부 사용 후 반품 불가 조항
+    GoldenItem(
+        query="묶음 상품 일부만 반품할 수 있나요?",
+        tool="search_policy", tool_args={"policy_type": "return"},
+        keywords=["묶음", "반품"],
+        query_type="status_value",
+    ),
+    # 조건명: "황금 회원" — 최상위 등급 기준
+    GoldenItem(
+        query="황금 회원이 되려면 얼마나 사야 해요?",
+        tool="search_policy", tool_args={"policy_type": "membership"},
+        keywords=["황금", "50만원"],
+        query_type="status_value",
+    ),
+    # 조건명: "무통장입금" — 입금 기한 조건
+    GoldenItem(
+        query="무통장입금 주문 후 입금 기한이 얼마나 돼요?",
+        tool="search_policy", tool_args={"policy_type": "payment"},
+        keywords=["24시간", "무통장입금"],
+        query_type="status_value",
+    ),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SIMILAR_POLICY  (5개) — 비슷해 보이지만 다른 두 개념을 동시에 구분
+    #   두 정책 문서 모두를 커버하는 키워드 조합 → 단일 청크에 두 단어가 함께 있어야 함
+    #   Dense는 한쪽 개념으로 편향될 수 있어 MRR 저하 가능
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # 반품 vs 교환 — 두 절차 모두 반품교환환불정책에 존재
+    GoldenItem(
+        query="반품이랑 교환 차이가 뭐예요?",
+        tool="search_policy", tool_args={"policy_type": "return"},
+        keywords=["반품", "교환"],
+        query_type="similar_policy",
+    ),
+    # 취소 vs 환불 — 주문 취소 후 환불 처리 시점
+    GoldenItem(
+        query="취소하면 환불은 언제 돼요?",
+        tool="search_policy", tool_args={"policy_type": "return"},
+        keywords=["환불", "영업일"],
+        query_type="similar_policy",
+    ),
+    # 배송비 환불 vs 상품 환불 — 귀책 사유별 배송비 처리 차이
+    GoldenItem(
+        query="반품할 때 배송비 환불도 받을 수 있나요?",
+        tool="search_policy", tool_args={"policy_type": "return"},
+        keywords=["배송비", "환불"],
+        query_type="similar_policy",
+    ),
+    # 씨앗 vs 새싹 회원 혜택 차이
+    GoldenItem(
+        query="씨앗 회원이랑 새싹 회원 혜택이 어떻게 달라요?",
+        tool="search_policy", tool_args={"policy_type": "membership"},
+        keywords=["씨앗", "새싹"],
+        query_type="similar_policy",
+    ),
+    # 반품 불가 vs 교환 불가 — 같은 사유인지 다른지
+    GoldenItem(
+        query="반품 불가 사유랑 교환 불가 사유가 같은 건가요?",
+        tool="search_policy", tool_args={"policy_type": "return"},
+        keywords=["반품", "교환", "불가"],
+        query_type="similar_policy",
+    ),
 ]
 
 
@@ -265,6 +393,68 @@ async def improved_retrieve(
         text = await search_policy_fn(query=item.query, **item.tool_args)
     elapsed = (time.perf_counter() - t0) * 1000
     return SearchResult(text=text or "", latency_ms=elapsed)
+
+
+def dense_reranker_retrieve(rag: RAGService, item: GoldenItem, top_k: int) -> SearchResult:
+    """실험 D: Dense + Reranker, BM25 없음.
+
+    hybrid_retrieve 대신 retrieve_multiple(Dense 전용)로 후보를 수집하고
+    Cross-Encoder reranker로 최종 top_k를 선별합니다.
+
+    비교 목적:
+      Baseline  (Dense only)          → A
+      이 함수   (Dense + Reranker)    → D
+      Improved  (Dense+BM25+Reranker) → C
+      D vs C 차이 = BM25의 실질적 기여도
+    """
+    from functools import partial
+    from ai.rag import normalize_query, rerank
+    from app.core.config import settings as _settings
+
+    nq = normalize_query(item.query)
+    collections = _tool_to_collections(item)
+
+    t0 = time.perf_counter()
+    # Dense 검색 — top_k * 2 후보 수집 (reranker에 충분한 풀 제공)
+    candidates = rag.retrieve_multiple(
+        nq, collections,
+        top_k_per=top_k * 2,
+        distance_threshold=_settings.rag_distance_threshold,
+    )
+    # Reranker 재정렬 (동기 함수 — 직접 호출)
+    docs = rerank(item.query, candidates, top_k)
+    elapsed = (time.perf_counter() - t0) * 1000
+    return SearchResult(text="\n\n".join(docs), latency_ms=elapsed)
+
+
+def weighted_rrf_retrieve(rag: RAGService, item: GoldenItem, top_k: int) -> SearchResult:
+    """실험 E: Dense(×2) + BM25(×0.5) + Reranker — 가중 RRF.
+
+    hybrid_retrieve에 dense_weight=2.0, bm25_weight=0.5를 전달하여
+    Dense 신뢰도를 BM25 대비 4배 높인 조합입니다.
+
+    비교 목적:
+      C  (Dense×1 + BM25×1 + Reranker) — 기존 균등 RRF
+      E  (Dense×2 + BM25×0.5 + Reranker) — Dense 우선 가중 RRF
+      E vs C 차이 = RRF 가중치 조정의 효과
+    """
+    from ai.rag import normalize_query, rerank
+    from app.core.config import settings as _settings
+
+    nq = normalize_query(item.query)
+    collections = _tool_to_collections(item)
+
+    t0 = time.perf_counter()
+    candidates = rag.hybrid_retrieve(
+        nq, collections,
+        top_k=top_k * 2,
+        distance_threshold=_settings.rag_distance_threshold,
+        dense_weight=2.0,
+        bm25_weight=0.5,
+    )
+    docs = rerank(item.query, candidates, top_k)
+    elapsed = (time.perf_counter() - t0) * 1000
+    return SearchResult(text="\n\n".join(docs), latency_ms=elapsed)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -479,6 +669,7 @@ def print_comparison(base: AggregateMetrics, imp: AggregateMetrics) -> None:
     print(f"  RAG 성능 평가 보고서  (N={base.n}개 쿼리, 15개 = Easy 5 + Medium 5 + Hard 5)")
     print("═" * 76)
 
+    total_n = base.n
     print(f"\n  {'지표':<16}  {'Baseline (Dense-only)':<24}  {'Improved (Hybrid+Rerank)':<24}  향상")
     print(f"  {'─'*16}  {'─'*24}  {'─'*24}  {'─'*10}")
 
@@ -520,19 +711,23 @@ def print_comparison(base: AggregateMetrics, imp: AggregateMetrics) -> None:
     print("  쿼리 난이도/유형별 Hit@1 & MRR  (★ 핵심 — rank 1 정밀도)")
     print("─" * 76)
     type_labels = {
-        "direct":       "직접 질문    ",
-        "colloquial":   "구어체 변형  ",
-        "synonym":      "동의어 변형  ",
-        "multi_intent": "복합 의도    ",
-        "exact_number": "정확한 수치  ",
-        "acronym":      "약어(OOV)    ",
-        "sparse_match": "희소 복합명사",
+        "direct":         "직접 질문    ",
+        "colloquial":     "구어체 변형  ",
+        "synonym":        "동의어 변형  ",
+        "multi_intent":   "복합 의도    ",
+        "exact_number":   "정확한 수치  ",
+        "acronym":        "약어(OOV)    ",
+        "sparse_match":   "희소 복합명사",
+        "clause_number":  "조항 번호    ",
+        "status_value":   "상태값/조건명",
+        "similar_policy": "유사 정책 구분",
     }
     print(f"  {'유형':<14}  {'B@1':>6}  {'I@1':>6}  {'@1향상':>7}  {'B MRR':>6}  {'I MRR':>6}  {'MRR향상':>7}  N")
     print(f"  {'─'*14}  {'─'*6}  {'─'*6}  {'─'*7}  {'─'*6}  {'─'*6}  {'─'*7}  ─")
     # 난이도 순서로 정렬
     _type_order = ["colloquial", "synonym", "multi_intent", "direct",
-                   "exact_number", "acronym", "sparse_match"]
+                   "exact_number", "acronym", "sparse_match",
+                   "clause_number", "status_value", "similar_policy"]
     all_types = _type_order + sorted(
         t for t in set(list(base.per_type.keys()) + list(imp.per_type.keys()))
         if t not in _type_order
@@ -605,8 +800,25 @@ async def _run(args):
     print(f"  top_k={top_k}  rerank={'ON' if use_rerank else 'OFF'}")
     print(f"  골든셋: {len(GOLDEN_SET)}개 쿼리\n")
     print("  평가 방식: cs_tools 레벨 (Supervisor LLM 라우팅 결정을 하드코딩 시뮬레이션)")
-    print("  Baseline = rag.retrieve() (pure Dense, normalize 없음)")
-    print("  Improved = search_faq / search_policy (프로덕션 코드 그대로)\n")
+    print("  A. Baseline       = rag.retrieve()                  (pure Dense, normalize 없음)")
+    print("  C. Improved       = search_policy()                 (Dense×1+BM25×1+RRF+Rerank)")
+    print("  D. Dense+Reranker = retrieve_multiple+rerank        (BM25 없음, Reranker만)")
+    print("  E. Weighted RRF   = hybrid_retrieve(d×2,b×0.5)+rr  (Dense 우선 가중 RRF)\n")
+
+    # ── 리랭커 선제 로딩 ─────────────────────────────────────────────────────
+    # Windows: bge-m3(임베딩) 로딩 후 CrossEncoder 로딩 시 가상메모리 한계 도달.
+    # ChromaDB/bge-m3 초기화 전에 CrossEncoder를 먼저 로딩하면 안정적으로 동작한다.
+    original_reranker = settings.reranker_model
+    if use_rerank and settings.reranker_model:
+        print(f"[리랭커 선제 로딩] {settings.reranker_model}")
+        from ai.rag import _load_reranker
+        reranker_instance = _load_reranker(settings.reranker_model)
+        if reranker_instance is None:
+            print("  → 로딩 실패 — rerank=OFF 로 전환")
+            use_rerank = False
+            settings.reranker_model = ""
+        else:
+            print("  → 로딩 완료\n")
 
     # ── RAGService 초기화 ────────────────────────────────────────────────────
     rag = RAGService()
@@ -615,8 +827,6 @@ async def _run(args):
         sys.exit(1)
 
     # ── cs_tools 빌드 (db=None, user_id=None — RAG 도구만 사용) ──────────────
-    # reranking 제어: no_rerank 플래그 적용을 위해 settings 임시 오버라이드
-    original_reranker = settings.reranker_model
     if not use_rerank:
         settings.reranker_model = ""
 
@@ -629,70 +839,145 @@ async def _run(args):
     print_chunk_quality(chunk_stats)
 
     # ── 워밍업 (cold-start 레이턴시 제거) ───────────────────────────────────
-    # 골든셋에 포함된 도구 종류만 예열 — 없는 도구는 건너뜀
-    print("\n[워밍업 중... 임베딩·리랭커 모델 로딩]", flush=True)
-    _faq_items    = [it for it in GOLDEN_SET if it.tool == "search_faq"]
-    _policy_items = [it for it in GOLDEN_SET if it.tool == "search_policy"]
-    for _ in range(2):
-        if _faq_items:
-            baseline_retrieve(rag, _faq_items[0], top_k)
-            await improved_retrieve(search_faq_fn, search_policy_fn, _faq_items[0], top_k)
-        if _policy_items:
-            baseline_retrieve(rag, _policy_items[0], top_k)
-            await improved_retrieve(search_faq_fn, search_policy_fn, _policy_items[0], top_k)
-    _warmed = " + ".join(filter(None, [
-        "FAQ" if _faq_items else "", "Policy" if _policy_items else ""
-    ]))
-    print(f"  워밍업 완료 ({_warmed} 예열)\n")
+    # Windows SIGSEGV 방지: torch 스레드 단일화
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except ImportError:
+        pass
+    print("\n[워밍업 스킵 — Windows SIGSEGV 방지 모드]\n", flush=True)
 
     # ── 검색 평가 ───────────────────────────────────────────────────────────
-    base_results: list[EvalResult] = []
-    imp_results:  list[EvalResult] = []
+    base_results:     list[EvalResult] = []
+    imp_results:      list[EvalResult] = []
+    dense_rr_results: list[EvalResult] = []
+    weighted_results: list[EvalResult] = []
 
     print("[검색 평가 진행 중...]")
     for i, item in enumerate(GOLDEN_SET, 1):
+        # A. Baseline: pure Dense
         b_sr = baseline_retrieve(rag, item, top_k)
         b_ev = evaluate_item(b_sr, item, top_k)
         base_results.append(b_ev)
 
+        # C. Improved: Dense + BM25 + Reranker (균등 가중치)
         i_sr = await improved_retrieve(search_faq_fn, search_policy_fn, item, top_k)
         i_ev = evaluate_item(i_sr, item, top_k)
         imp_results.append(i_ev)
 
+        # D. Dense + Reranker (BM25 없음)
+        d_sr = dense_reranker_retrieve(rag, item, top_k)
+        d_ev = evaluate_item(d_sr, item, top_k)
+        dense_rr_results.append(d_ev)
+
+        # E. Dense(×2) + BM25(×0.5) + Reranker (Dense 우선 가중 RRF)
+        e_sr = weighted_rrf_retrieve(rag, item, top_k)
+        e_ev = evaluate_item(e_sr, item, top_k)
+        weighted_results.append(e_ev)
+
         if verbose:
-            b_mark = "✓" if b_ev.hit else "✗"
-            i_mark = "✓" if i_ev.hit else "✗"
+            b_mark  = "✓" if b_ev.hit  else "✗"
+            i_mark  = "✓" if i_ev.hit  else "✗"
+            d_mark  = "✓" if d_ev.hit  else "✗"
+            e_mark  = "✓" if e_ev.hit  else "✗"
             b1_mark = "①" if b_ev.hit1 else "·"
             i1_mark = "①" if i_ev.hit1 else "·"
+            d1_mark = "①" if d_ev.hit1 else "·"
+            e1_mark = "①" if e_ev.hit1 else "·"
             tool_short = "FAQ   " if item.tool == "search_faq" else "Policy"
             print(
-                f"  [{i:02d}] B:{b_mark}{b1_mark} I:{i_mark}{i1_mark}  {tool_short}  "
-                f"{item.query_type:<14}  {item.query[:42]}"
+                f"  [{i:02d}] A:{b_mark}{b1_mark} C:{i_mark}{i1_mark} D:{d_mark}{d1_mark} E:{e_mark}{e1_mark}  "
+                f"{tool_short}  {item.query_type:<14}  {item.query[:38]}"
             )
         else:
-            print(f"  [{i:02d}/{len(GOLDEN_SET)}] {'✓' if i_ev.hit else '✗'} {item.query[:55]}", end="\r")
+            print(
+                f"  [{i:02d}/{len(GOLDEN_SET)}] "
+                f"A:{'✓' if b_ev.hit else '✗'} C:{'✓' if i_ev.hit else '✗'} "
+                f"D:{'✓' if d_ev.hit else '✗'} E:{'✓' if e_ev.hit else '✗'}  "
+                f"{item.query[:48]}",
+                end="\r",
+            )
 
-    print(" " * 72, end="\r")
+    print(" " * 80, end="\r")
 
     # 원복
     settings.reranker_model = original_reranker
 
     # ── 집계 및 출력 ────────────────────────────────────────────────────────
-    base_agg = aggregate("Baseline", base_results)
-    imp_agg  = aggregate("Improved", imp_results)
+    base_agg     = aggregate("Baseline (A: Dense)", base_results)
+    imp_agg      = aggregate("Improved (C: Dense+BM25+Reranker)", imp_results)
+    dense_rr_agg = aggregate("Dense+Reranker (D: BM25 없음)", dense_rr_results)
+    weighted_agg = aggregate("Weighted RRF (E: Dense×2+BM25×0.5+Reranker)", weighted_results)
+
+    # A vs C 비교 (기존)
+    print("\n" + "━" * 76)
+    print("  [A vs C]  Baseline vs Improved (Dense+BM25+Reranker)")
     print_comparison(base_agg, imp_agg)
 
-    # ── 미스 케이스 ─────────────────────────────────────────────────────────
-    failed = [r for r in imp_results if not r.hit]
-    if failed:
-        print(f"\n[미스 케이스] Improved에서 Hit 실패한 쿼리 ({len(failed)}개):")
-        for r in failed:
-            print(f"  - [{r.query_type}] {r.query}")
+    # A vs D 비교 (리랭커만의 효과)
+    print("\n" + "━" * 76)
+    print("  [A vs D]  Baseline vs Dense+Reranker (BM25 없음)")
+    print_comparison(base_agg, dense_rr_agg)
+
+    # D vs C 비교 (BM25의 순수 기여도)
+    print("\n" + "━" * 76)
+    print("  [D vs C]  Dense+Reranker vs Dense+BM25+Reranker (균등 RRF)")
+    print_comparison(dense_rr_agg, imp_agg)
+
+    # C vs E 비교 (RRF 가중치 조정 효과)
+    print("\n" + "━" * 76)
+    print("  [C vs E]  균등 RRF vs 가중 RRF (Dense×2 + BM25×0.5)")
+    print_comparison(imp_agg, weighted_agg)
+
+    # ── 핵심 요약 ────────────────────────────────────────────────────────────
+    print("\n" + "━" * 76)
+    print("  실험 요약 (MRR 기준)")
+    print("━" * 76)
+    print(f"  A. Baseline       (Dense only)               MRR={base_agg.mrr:.3f}  Hit@3={base_agg.hit_rate:.1%}  Hit@1={base_agg.hit1_rate:.1%}")
+    print(f"  C. Improved       (Dense×1+BM25×1+Reranker) MRR={imp_agg.mrr:.3f}  Hit@3={imp_agg.hit_rate:.1%}  Hit@1={imp_agg.hit1_rate:.1%}")
+    print(f"  D. Dense+Reranker (BM25 없음)                MRR={dense_rr_agg.mrr:.3f}  Hit@3={dense_rr_agg.hit_rate:.1%}  Hit@1={dense_rr_agg.hit1_rate:.1%}")
+    print(f"  E. Weighted RRF   (Dense×2+BM25×0.5+Rerank) MRR={weighted_agg.mrr:.3f}  Hit@3={weighted_agg.hit_rate:.1%}  Hit@1={weighted_agg.hit1_rate:.1%}")
+    d_vs_c_mrr = imp_agg.mrr - dense_rr_agg.mrr
+    e_vs_c_mrr = weighted_agg.mrr - imp_agg.mrr
+    if e_vs_c_mrr > 0.005:
+        print(f"\n  → 가중 RRF(E) 효과: 있음 (C→E MRR {e_vs_c_mrr:+.3f})")
+        print("     Dense 우선 가중치가 BM25 노이즈를 효과적으로 억제")
+    elif e_vs_c_mrr < -0.005:
+        print(f"\n  → 가중 RRF(E) 효과: 역효과 (C→E MRR {e_vs_c_mrr:+.3f})")
+        print("     BM25 기여가 예상보다 크거나 가중치 추가 튜닝 필요")
     else:
-        print("\n✅  Improved 방식에서 모든 쿼리 Hit 성공!")
+        print(f"\n  → 가중 RRF(E) 효과: 미미 (C↔E MRR 차이 {e_vs_c_mrr:+.3f})")
+    if abs(d_vs_c_mrr) < 0.01:
+        print(f"     리랭커가 성능 개선의 핵심 요인 (D↔C {d_vs_c_mrr:+.3f})")
+    elif d_vs_c_mrr > 0:
+        print(f"     BM25 기여도: 있음 (D→C MRR {d_vs_c_mrr:+.3f})")
+    else:
+        print(f"     BM25 균등 RRF는 성능 저하 (D→C {d_vs_c_mrr:+.3f})")
+    print("━" * 76)
+
+    # ── 미스 케이스 ─────────────────────────────────────────────────────────
+    failed_c = [r for r in imp_results if not r.hit]
+    failed_d = [r for r in dense_rr_results if not r.hit]
+    if failed_c:
+        print(f"\n[미스 케이스] C(Improved)에서 Hit 실패한 쿼리 ({len(failed_c)}개):")
+        for r in failed_c:
+            d_hit = dense_rr_results[imp_results.index(r)].hit if r in imp_results else "?"
+            print(f"  - [{r.query_type}] {r.query}  (D hit={d_hit})")
+    else:
+        print("\n✅  Improved(C) 방식에서 모든 쿼리 Hit 성공!")
 
     # ── JSON 내보내기 ────────────────────────────────────────────────────────
     if args.export:
+        def _agg_dict(agg: AggregateMetrics) -> dict:
+            return {
+                "hit_rate":        round(agg.hit_rate, 4),
+                "hit1_rate":       round(agg.hit1_rate, 4),
+                "mrr":             round(agg.mrr, 4),
+                "mean_latency_ms": round(agg.mean_latency_ms, 2),
+                "p95_latency_ms":  round(agg.p95_latency_ms, 2),
+                "per_type":        agg.per_type,
+                "per_tool":        agg.per_tool,
+            }
         export_data = {
             "config": {
                 "top_k": top_k,
@@ -702,40 +987,52 @@ async def _run(args):
                 "reranker_model": original_reranker if use_rerank else None,
                 "golden_set_size": len(GOLDEN_SET),
                 "eval_level": "cs_tools (post-LLM-routing simulation)",
+                "experiments": {
+                    "A": "Baseline — Dense only, normalize 없음",
+                    "C": "Improved — Dense×1+BM25×1+RRF+Reranker (프로덕션 search_policy)",
+                    "D": "Dense+Reranker — BM25 없음, Reranker만 추가",
+                    "E": "Weighted RRF — Dense×2+BM25×0.5+Reranker (Dense 우선 가중 RRF)",
+                },
             },
             "chunk_quality": chunk_stats,
-            "baseline": {
-                "hit_rate":        round(base_agg.hit_rate, 4),
-                "hit1_rate":       round(base_agg.hit1_rate, 4),
-                "mrr":             round(base_agg.mrr, 4),
-                "mean_latency_ms": round(base_agg.mean_latency_ms, 2),
-                "p95_latency_ms":  round(base_agg.p95_latency_ms, 2),
-                "per_type":        base_agg.per_type,
-                "per_tool":        base_agg.per_tool,
-            },
-            "improved": {
-                "hit_rate":        round(imp_agg.hit_rate, 4),
-                "hit1_rate":       round(imp_agg.hit1_rate, 4),
-                "mrr":             round(imp_agg.mrr, 4),
-                "mean_latency_ms": round(imp_agg.mean_latency_ms, 2),
-                "p95_latency_ms":  round(imp_agg.p95_latency_ms, 2),
-                "per_type":        imp_agg.per_type,
-                "per_tool":        imp_agg.per_tool,
-            },
-            "delta": {
+            "baseline":        _agg_dict(base_agg),
+            "improved":        _agg_dict(imp_agg),
+            "dense_reranker":  _agg_dict(dense_rr_agg),
+            "weighted_rrf":    _agg_dict(weighted_agg),
+            "delta_A_to_C": {
                 "hit_rate":        round(imp_agg.hit_rate  - base_agg.hit_rate,  4),
                 "hit1_rate":       round(imp_agg.hit1_rate - base_agg.hit1_rate, 4),
                 "mrr":             round(imp_agg.mrr       - base_agg.mrr,       4),
                 "mean_latency_ms": round(imp_agg.mean_latency_ms - base_agg.mean_latency_ms, 2),
             },
-            "per_query_baseline": [asdict(r) for r in base_results],
-            "per_query_improved": [asdict(r) for r in imp_results],
+            "delta_A_to_D": {
+                "hit_rate":        round(dense_rr_agg.hit_rate  - base_agg.hit_rate,  4),
+                "hit1_rate":       round(dense_rr_agg.hit1_rate - base_agg.hit1_rate, 4),
+                "mrr":             round(dense_rr_agg.mrr       - base_agg.mrr,       4),
+                "mean_latency_ms": round(dense_rr_agg.mean_latency_ms - base_agg.mean_latency_ms, 2),
+            },
+            "delta_D_to_C": {
+                "hit_rate":        round(imp_agg.hit_rate  - dense_rr_agg.hit_rate,  4),
+                "hit1_rate":       round(imp_agg.hit1_rate - dense_rr_agg.hit1_rate, 4),
+                "mrr":             round(imp_agg.mrr       - dense_rr_agg.mrr,       4),
+                "mean_latency_ms": round(imp_agg.mean_latency_ms - dense_rr_agg.mean_latency_ms, 2),
+            },
+            "delta_C_to_E": {
+                "hit_rate":        round(weighted_agg.hit_rate  - imp_agg.hit_rate,  4),
+                "hit1_rate":       round(weighted_agg.hit1_rate - imp_agg.hit1_rate, 4),
+                "mrr":             round(weighted_agg.mrr       - imp_agg.mrr,       4),
+                "mean_latency_ms": round(weighted_agg.mean_latency_ms - imp_agg.mean_latency_ms, 2),
+            },
+            "per_query_baseline":      [asdict(r) for r in base_results],
+            "per_query_improved":      [asdict(r) for r in imp_results],
+            "per_query_dense_reranker": [asdict(r) for r in dense_rr_results],
+            "per_query_weighted_rrf":  [asdict(r) for r in weighted_results],
         }
         with open(args.export, "w", encoding="utf-8") as f:
             json.dump(export_data, f, ensure_ascii=False, indent=2)
         print(f"\n📄 결과 저장: {args.export}")
 
-    return base_agg, imp_agg
+    return base_agg, imp_agg, dense_rr_agg, weighted_agg
 
 
 def main():
@@ -745,6 +1042,9 @@ def main():
     parser.add_argument("--export",   type=str, default="", help="결과를 JSON 파일로 저장")
     parser.add_argument("--verbose",  action="store_true",  help="쿼리별 상세 결과 출력")
     args = parser.parse_args()
+    # Windows SelectorEventLoopPolicy — ProactorEventLoop에서 C 확장 SIGSEGV 방지
+    if sys.platform.startswith("win"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(_run(args))
 
 

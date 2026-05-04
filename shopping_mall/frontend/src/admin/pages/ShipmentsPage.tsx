@@ -6,7 +6,7 @@ import {
   SHIPMENT_STATUS_COLOR,
   SHIPMENT_STATUS_STEP,
 } from '@/admin/types/shipment';
-import type { AdminShipment, ShipmentStatus } from '@/admin/types/shipment';
+import type { AdminShipment } from '@/admin/types/shipment';
 import { formatDate, formatPrice } from '@/lib/utils';
 
 const CARRIERS = ['CJ대한통운', '한진', '로젠', '우체국택배', '롯데택배'];

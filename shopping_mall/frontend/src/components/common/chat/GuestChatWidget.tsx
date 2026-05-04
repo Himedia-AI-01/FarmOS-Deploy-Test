@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation } from '@tanstack/react-query';
 import api from '@/lib/api';
 import { INTENT_LABEL } from '@/admin/constants/chatbot';
 import { renderChatText } from './ChatTextRenderer';
@@ -26,11 +26,12 @@ function getOrCreateGuestId(): number {
 }
 
 const QUICK_ACTIONS = [
-  { label: '📦 배송 조회', intent: 'delivery', text: '배송 현황을 알고 싶어요' },
-  { label: '🍎 재고 확인', intent: 'stock', text: '재고 확인해 주세요' },
-  { label: '❄️ 보관 방법', intent: 'storage', text: '상품 보관 방법이 궁금해요' },
-  { label: '↩️ 교환/환불', intent: 'exchange', text: '교환/환불하고 싶어요' },
-  { label: '🌸 제철 상품', intent: 'season', text: '요즘 제철 상품이 뭔가요?' },
+  { id: 'delivery', label: '📦 배송 조회', intent: 'delivery', text: '배송 현황을 알고 싶어요' },
+  { id: 'stock', label: '🍎 재고 확인', intent: 'stock', text: '재고 확인해 주세요' },
+  { id: 'storage', label: '❄️ 보관 방법', intent: 'storage', text: '상품 보관 방법이 궁금해요' },
+  { id: 'exchange', label: '↩️ 교환', intent: 'exchange', text: '교환하고 싶어요' },
+  { id: 'refund', label: '💳 환불', intent: 'cancel', text: '환불하고 싶어요' },
+  { id: 'season', label: '🌸 제철 상품', intent: 'season', text: '요즘 제철 상품이 뭔가요?' },
 ];
 
 function loadGuestSession(): Message[] {
@@ -192,7 +193,7 @@ export default function GuestChatWidget() {
           <div className="px-3 py-2 border-t border-gray-100 flex gap-1.5 overflow-x-auto shrink-0" style={{ scrollbarWidth: 'none' }}>
             {QUICK_ACTIONS.map((action) => (
               <button
-                key={action.intent}
+                key={action.id}
                 onClick={() => send(action.text, action.intent)}
                 disabled={isPending}
                 className="shrink-0 text-xs px-2.5 py-1.5 rounded-full border border-gray-200 text-gray-600 hover:border-[#03C75A] hover:text-[#03C75A] transition-colors disabled:opacity-40"

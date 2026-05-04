@@ -3,9 +3,15 @@ import { NavLink } from 'react-router-dom';
 import { useChatSessions, useSessionLogs } from '@/admin/hooks/useChatbot';
 import { useUserExchangeTickets } from '@/admin/hooks/useTickets';
 import { INTENT_LABEL, INTENT_COLOR_BADGE as INTENT_COLOR } from '@/admin/constants/chatbot';
-import { TICKET_STATUS_LABEL, TICKET_STATUS_COLOR, TICKET_ACTION_LABEL, TICKET_ACTION_COLOR } from '@/admin/types/ticket';
+import {
+  TICKET_STATUS_LABEL,
+  TICKET_STATUS_COLOR,
+  TICKET_ACTION_LABEL,
+  TICKET_ACTION_COLOR,
+  TICKET_FLAG_COLOR,
+} from '@/admin/types/ticket';
 import { formatDate } from '@/lib/utils';
-import type { ChatSession } from '@/admin/types/chatlog';
+import type { ChatLog, ChatSession } from '@/admin/types/chatlog';
 import type { Ticket } from '@/admin/types/ticket';
 
 // ──────────────────────────────────────────
@@ -59,7 +65,11 @@ function RelatedTickets({ tickets, isLoading }: { tickets: Ticket[]; isLoading: 
             {/* Card header */}
             <div className={`flex items-center justify-between px-3 py-2 ${isDone ? 'bg-stone-50' : 'bg-emerald-50'}`}>
               <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${TICKET_ACTION_COLOR[ticket.action_type]} ${
-                ticket.action_type === 'exchange' ? 'border-purple-200' : 'border-red-200'
+                ticket.action_type === 'exchange'
+                  ? 'border-emerald-200'
+                  : ticket.action_type === 'change'
+                    ? 'border-amber-200'
+                    : 'border-rose-200'
               }`}>
                 {TICKET_ACTION_LABEL[ticket.action_type]}
               </span>
@@ -71,10 +81,20 @@ function RelatedTickets({ tickets, isLoading }: { tickets: Ticket[]; isLoading: 
               <p className="text-xs text-stone-700 line-clamp-2 leading-relaxed mb-2.5">
                 {ticket.reason}
               </p>
-              <div className="flex items-center justify-between">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${TICKET_STATUS_COLOR[ticket.status]}`}>
-                  {TICKET_STATUS_LABEL[ticket.status]}
-                </span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap gap-1.5">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${TICKET_STATUS_COLOR[ticket.status]}`}>
+                    {TICKET_STATUS_LABEL[ticket.status]}
+                  </span>
+                  {(ticket.flags ?? []).map((flag: Ticket['flags'][number]) => (
+                    <span
+                      key={flag.code}
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${TICKET_FLAG_COLOR[flag.severity]}`}
+                    >
+                      {flag.label}
+                    </span>
+                  ))}
+                </div>
                 <NavLink
                   to={`/admin/tickets?ticketId=${ticket.id}`}
                   className="flex items-center gap-0.5 text-[11px] font-bold text-emerald-700 hover:text-emerald-900 transition-colors"
@@ -107,9 +127,11 @@ export default function ChatbotPage() {
 
   // 선택된 세션에서 발생한 미처리 티켓 — 상세 헤더 배너용
   const pendingSelectedTickets = selectedUserTickets.filter(
-    (t) => t.session_id === selectedSession?.id &&
+    (t: Ticket) => t.session_id === selectedSession?.id &&
       (t.status === 'received' || t.status === 'processing'),
   );
+  const relatedTickets = selectedUserTickets.filter((t: Ticket) => t.session_id === selectedSession?.id);
+  const selectedFlaggedTickets = relatedTickets.filter((t: Ticket) => (t.flags ?? []).length > 0);
 
   const isLoading = tab === 'all' ? loadingAll : loadingEsc;
   const sessions = tab === 'all' ? allSessions : escalatedSessions;
@@ -191,7 +213,7 @@ export default function ChatbotPage() {
               <p className="text-sm text-stone-400">대화 내역이 없습니다.</p>
             </div>
           ) : (
-            sessions.map((session) => {
+            sessions.map((session: ChatSession) => {
               const preview = session.title
                 ?? (session.last_question ? session.last_question.slice(0, 40) : '내용 없음');
               const isSelected = selectedSession?.id === session.id;
@@ -284,6 +306,25 @@ export default function ChatbotPage() {
                   <p className="text-sm text-stone-500 font-medium">
                     채팅 시작 · {formatDate(selectedSession.created_at)}
                   </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
+                      selectedSession.status === 'active'
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-stone-100 text-stone-500'
+                    }`}>
+                      {selectedSession.status === 'active' ? '진행중' : '종료'}
+                    </span>
+                    {selectedSession.has_escalation && (
+                      <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-300">
+                        상담원 확인 필요
+                      </span>
+                    )}
+                    {selectedFlaggedTickets.length > 0 && (
+                      <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-300">
+                        운영 플래그 {selectedFlaggedTickets.length}건
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Action buttons */}
@@ -349,7 +390,7 @@ export default function ChatbotPage() {
               ) : (
                 (() => {
                   prevDateStr = '';
-                  return sessionLogs.map((log) => {
+                  return sessionLogs.map((log: ChatLog) => {
                     const logDateStr = formatDate(log.created_at, 'yyyy-MM-dd');
                     const showDateSep = logDateStr !== prevDateStr;
                     prevDateStr = logDateStr;
@@ -400,28 +441,7 @@ export default function ChatbotPage() {
                           </div>
                         </div>
 
-                        {/* Rating section */}
-                        {log.rating != null && (
-                          <div className="flex flex-col items-center gap-3 pt-2">
-                            <p className="text-xs font-bold text-stone-400 uppercase tracking-widest">
-                              상담 품질 피드백
-                            </p>
-                            <div className="flex gap-1" aria-label={`평점 ${log.rating}점`}>
-                              {Array.from({ length: 5 }, (_, i) => (
-                                <span
-                                  key={i}
-                                  className={`material-symbols-outlined text-[22px] ${
-                                    i < log.rating! ? 'text-primary' : 'text-stone-300'
-                                  }`}
-                                  style={i < log.rating! ? { fontVariationSettings: "'FILL' 1" } : undefined}
-                                  aria-hidden="true"
-                                >
-                                  star
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
+
                       </div>
                     );
                   });
@@ -507,9 +527,9 @@ export default function ChatbotPage() {
                 연관 티켓
               </h3>
 
-              {sessionLogs.some((l) => l.intent === 'exchange') ? (
+              {relatedTickets.length > 0 || loadingSelectedTickets ? (
                 <RelatedTickets
-                  tickets={selectedUserTickets.filter((t) => t.session_id === selectedSession.id)}
+                  tickets={relatedTickets}
                   isLoading={loadingSelectedTickets}
                 />
               ) : (
@@ -517,7 +537,7 @@ export default function ChatbotPage() {
                   <span className="material-symbols-outlined text-stone-200 text-[28px]" aria-hidden="true">
                     inventory_2
                   </span>
-                  <p className="text-xs text-stone-400">교환 관련 대화가 없습니다.</p>
+                  <p className="text-xs text-stone-400">연관된 티켓이 없습니다.</p>
                 </div>
               )}
             </div>

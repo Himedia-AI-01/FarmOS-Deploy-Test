@@ -1,4 +1,4 @@
-"""교환/취소 티켓 모델 — OrderGraph 멀티스텝 HitL 최종 결과물."""
+"""교환/취소/주문 변경 티켓 모델 — OrderGraph 멀티스텝 HitL 최종 결과물."""
 from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func, text
@@ -8,7 +8,7 @@ from app.database import Base
 
 
 class ShopTicket(Base):
-    """교환·취소 접수 티켓.
+    """교환·취소·주문 변경 접수 티켓.
 
     OrderGraph가 사용자와 멀티스텝 대화로 수집한 정보를 최종 저장합니다.
     오피스 툴에서 이 테이블을 읽어 처리합니다.
@@ -39,7 +39,7 @@ class ShopTicket(Base):
         Integer, ForeignKey("shop_orders.id"), nullable=False
     )
 
-    # "cancel" | "exchange"
+    # "cancel" | "exchange" | "change"
     action_type: Mapped[str] = mapped_column(String(20), nullable=False)
 
     # 취소/교환 공통 사유
@@ -48,8 +48,14 @@ class ShopTicket(Base):
     # 취소 플로우만: "원결제 수단" | "포인트" 등
     refund_method: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
-    # 교환 플로우만: JSON 배열 — [{"item_id": int, "name": str, "qty": int}]
+    # 교환/변경 플로우: JSON 배열
+    # - exchange: [{"item_id": int, "name": str, "qty": int}]
+    # - change: [{"change_type": str, "change_detail": str}]
     items: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 운영팀 확인용 플래그. DB 컬럼은 Text이며, 값은 JSON 배열 형태로 직렬화해 저장합니다.
+    # 예: [{"code": "high_value_review", "label": "5만원 이상 운영팀 우선 확인", "severity": "warning"}]
+    flags: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
 
     # "received" → "processing" → "completed" | "cancelled"
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="received")

@@ -209,6 +209,32 @@ function preflightCheck() {
   info(`사전 체크 통과 — 인증 OK, DB "${targetDb}" 존재 확인`);
 }
 
+/** additive schema patches that are safe to apply before metadata verification.
+ *  Backend startup has the same patch, but Web_Starter verifies DB shape before
+ *  starting backend; without this hook teammates with an existing DB would stop
+ *  at column drift and never reach the backend patch. */
+function applySafeSchemaPatches() {
+  section("안전 스키마 보강");
+  const sql = `
+DO $$
+BEGIN
+  IF to_regclass('public.shop_tickets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1
+       FROM information_schema.columns
+       WHERE table_schema='public'
+         AND table_name='shop_tickets'
+         AND column_name='flags'
+     )
+  THEN
+    ALTER TABLE public.shop_tickets ADD COLUMN flags TEXT NOT NULL DEFAULT '[]';
+  END IF;
+END $$;
+`;
+  psqlExec(sql);
+  info("additive schema patch 확인 완료 — shop_tickets.flags");
+}
+
 /** psql 결과를 행/필드 2차원 배열로. 빈 줄 무시.
  *  Windows psql 은 `\r\n` 으로 줄바꿈을 출력하므로 CR 도 함께 처리한다 — 그렇지 않으면
  *  테이블명 끝에 `\r` 이 붙어 비교가 모두 mismatch 가 된다. */
@@ -438,6 +464,22 @@ function runPhase(phase) {
   info(`${phase} 완료`);
 }
 
+function runPostUpdateHooks() {
+  section("ShoppingMall 후속 보강");
+  const result = spawnSync("python", [path.join(projectRoot, "bootstrap", "apply_shop_updates.py")], {
+    cwd: projectRoot,
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1",
+    },
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`apply_shop_updates.py exit=${result.status}`);
+  info("ShoppingMall 후속 보강 완료");
+}
+
 // ============================================================================
 // main
 // ============================================================================
@@ -449,6 +491,7 @@ function main() {
   // 사전 체크 — 인증/연결/DB 존재 — 명확한 한글 메시지로 빠른 실패.
   try {
     preflightCheck();
+    applySafeSchemaPatches();
   } catch (e) {
     error(e.message);
     return EXIT_ENV_ERROR;
@@ -482,6 +525,12 @@ function main() {
 
   if (isVerifyClean(initial)) {
     info("DB 상태 정상 — Phase 1/2 호출 생략");
+    try {
+      runPostUpdateHooks();
+    } catch (e) {
+      error(`후속 보강 실패: ${e.message}`);
+      return EXIT_PHASE_FAILED;
+    }
     return EXIT_OK;
   }
 
@@ -529,6 +578,13 @@ function main() {
 
   if (after.columnIssues.length > 0) {
     warn(`재검증에서 컬럼 drift ${after.columnIssues.length}건 — 경고만 표시하고 진행`);
+  }
+
+  try {
+    runPostUpdateHooks();
+  } catch (e) {
+    error(`후속 보강 실패: ${e.message}`);
+    return EXIT_PHASE_FAILED;
   }
 
   info("자동화 정상 종료");

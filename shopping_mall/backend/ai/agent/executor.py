@@ -28,7 +28,7 @@ from ai.agent.responses import (
     MAX_ITERATIONS_EXCEEDED,
     LLM_GENERATION_FAILED,
     TRUNCATION_SUFFIX,
-    REFUSED,
+    refusal_response,
 )
 
 # 하위 호환성 별칭 — 이 모듈 내부 및 테스트에서 사용
@@ -43,6 +43,16 @@ MAX_ANSWER_LENGTH = 1000
 _RAG_TOOL_NAMES: frozenset[str] = frozenset({
     "search_faq",
     "search_policy",
+})
+
+# Supervisor가 확정해서 넘길 수 있는 read-only 도구만 직접 실행한다.
+# 주문 취소/환불 같은 action 도구는 OrderGraph 확인 플로우를 유지한다.
+_DIRECT_HINT_TOOL_NAMES: frozenset[str] = frozenset({
+    "search_faq",
+    "search_policy",
+    "get_order_status",
+    "search_products",
+    "get_product_detail",
 })
 
 
@@ -119,6 +129,31 @@ _EMPTY_RESULT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"검색\s*결과가\s*없습니다"),
 )
 
+_INTERNAL_TERM_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\s*\(\s*order_id\s*\)", re.IGNORECASE), ""),
+    (re.compile(r"(?<![A-Za-z0-9_])order_id(?![A-Za-z0-9_])", re.IGNORECASE), "주문 번호"),
+    (re.compile(r"(?<![A-Za-z0-9_])user_id(?![A-Za-z0-9_])", re.IGNORECASE), "고객 정보"),
+    (re.compile(r"(?<![A-Za-z0-9_])session_id(?![A-Za-z0-9_])", re.IGNORECASE), "상담 정보"),
+    (re.compile(r"(?<![A-Za-z0-9_])tracking_number(?![A-Za-z0-9_])", re.IGNORECASE), "송장번호"),
+    (re.compile(r"(?<![A-Za-z0-9_])status(?![A-Za-z0-9_])", re.IGNORECASE), "상태"),
+    (re.compile(r"(?<![A-Za-z0-9_])picked_up(?![A-Za-z0-9_])", re.IGNORECASE), "배송 준비 완료"),
+    (re.compile(r"(?<![A-Za-z0-9_])in_transit(?![A-Za-z0-9_])", re.IGNORECASE), "배송 중"),
+    (re.compile(r"(?<![A-Za-z0-9_])shipping(?![A-Za-z0-9_])", re.IGNORECASE), "배송 중"),
+    (re.compile(r"(?<![A-Za-z0-9_])delivered(?![A-Za-z0-9_])", re.IGNORECASE), "배송 완료"),
+    (re.compile(r"(?<![A-Za-z0-9_])pending(?![A-Za-z0-9_])", re.IGNORECASE), "결제 완료"),
+    (re.compile(r"(?<![A-Za-z0-9_])preparing(?![A-Za-z0-9_])", re.IGNORECASE), "배송 준비 중"),
+    (re.compile(r"(?<![A-Za-z0-9_])cancelled(?![A-Za-z0-9_])", re.IGNORECASE), "취소 완료"),
+    (re.compile(r"(?<![A-Za-z0-9_])returned(?![A-Za-z0-9_])", re.IGNORECASE), "반품 완료"),
+)
+
+_POLICY_CITATION_RE = re.compile(r"\[([^\]\n]*(?:정책|규정)[^\]\n]*)\]")
+
+_DISALLOWED_LEADING_TONE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*다\s*알겠습니다[!.。．]*\s*", re.IGNORECASE),
+    re.compile(r"^\s*네[,，]?\s*알겠습니다[!.。．]*\s*", re.IGNORECASE),
+    re.compile(r"^\s*알겠습니다[!.。．]*\s*", re.IGNORECASE),
+)
+
 
 def _is_empty_result(result: str) -> bool:
     normalized = re.sub(r"\s+", " ", result).strip()
@@ -148,6 +183,62 @@ def _parse_answer(raw: str) -> str:
     return truncated + TRUNCATION_SUFFIX
 
 
+def _sanitize_internal_terms(answer: str) -> str:
+    text = answer
+    for pattern, replacement in _INTERNAL_TERM_REPLACEMENTS:
+        text = pattern.sub(replacement, text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def _sanitize_leading_tone(answer: str) -> str:
+    text = answer
+    for pattern in _DISALLOWED_LEADING_TONE_PATTERNS:
+        text = pattern.sub("", text, count=1)
+    return text.lstrip()
+
+
+def _format_policy_citation(raw: str) -> str | None:
+    match = _POLICY_CITATION_RE.search(raw)
+    if not match:
+        return None
+
+    parts = [p.strip() for p in match.group(1).split(">") if p.strip()]
+    if not parts:
+        return None
+
+    doc = parts[0]
+    article = next((p for p in parts if re.search(r"제\s*\d+\s*조", p)), None)
+    if article:
+        article_no = re.search(r"제\s*\d+\s*조", article)
+        return f"{doc} {article_no.group(0).replace(' ', '')}"
+    if len(parts) >= 2:
+        return f"{doc} {parts[-1]}"
+    return doc
+
+
+def _ensure_policy_citation(answer: str, trace: list[TraceStep]) -> str:
+    if "근거:" in answer or not any(step.tool == "search_policy" for step in trace):
+        return answer
+
+    citations: list[str] = []
+    for step in trace:
+        if step.tool != "search_policy":
+            continue
+        citation = _format_policy_citation(step.result)
+        if citation and citation not in citations:
+            citations.append(citation)
+
+    if not citations:
+        return answer
+
+    return f"{answer}\n\n(근거: {', '.join(citations[:3])})"
+
+
+def _finalize_customer_answer(answer: str, trace: list[TraceStep] | None = None) -> str:
+    text = _sanitize_leading_tone(_sanitize_internal_terms(answer))
+    return _ensure_policy_citation(text, trace or [])
+
+
 def _log_trace(trace: list[TraceStep], question: str) -> None:
     if not trace:
         logger.info("[trace] 질문='%s' → 도구 호출 없음 (직접 답변)", question[:60])
@@ -168,6 +259,91 @@ def _history_to_lc(history: list[dict]) -> list[BaseMessage]:
         elif role in ("assistant", "bot"):
             messages.append(AIMessage(content=content))
     return messages
+
+
+def _format_order_status_answer(tool_result: str) -> str:
+    """get_order_status 결과를 고객용 배송 현황 답변으로 결정적 포맷팅한다."""
+    text = tool_result.strip()
+    if not text or "조회된 주문이 없습니다" in text or text == LOGIN_REQUIRED_RESPONSE:
+        return text
+
+    total_orders: int | None = None
+    shown_orders: int | None = None
+    header_match = re.search(r"전체 주문:\s*(\d+)건\s*/\s*아래 최근\s*(\d+)건 표시", text)
+    if header_match:
+        total_orders = int(header_match.group(1))
+        shown_orders = int(header_match.group(2))
+
+    sections = [
+        s.strip()
+        for s in re.split(r"\n\s*---\s*\n", re.sub(r"^\[.*?\]\s*", "", text).strip())
+        if s.strip()
+    ]
+    if not sections:
+        return text
+
+    lines = [f"최근 {len(sections)}건의 주문 배송 현황입니다."]
+    has_expected_arrival = False
+
+    for idx, section in enumerate(sections, start=1):
+        fields: dict[str, str] = {}
+        for raw_line in section.splitlines():
+            if ":" not in raw_line:
+                continue
+            key, value = raw_line.split(":", 1)
+            fields[key.strip()] = value.strip()
+
+        order_no = fields.get("주문번호", f"#{idx}")
+        if order_no and not order_no.startswith("#"):
+            order_no = f"#{order_no}"
+        product = fields.get("상품", "상품 정보 없음")
+        order_status = fields.get("주문상태")
+        carrier = fields.get("택배사")
+        tracking = fields.get("송장번호")
+        shipping_status = fields.get("배송상태")
+        expected = fields.get("예상 도착일")
+        no_shipping = fields.get("배송정보")
+
+        lines.append("")
+        lines.append(f"{idx}. 주문 {order_no}")
+        lines.append(f"   - 상품: {product}")
+        if order_status:
+            lines.append(f"   - 주문 상태: {order_status}")
+
+        if no_shipping:
+            lines.append("   - 배송 정보: 아직 등록되지 않았습니다.")
+        else:
+            if carrier:
+                lines.append(f"   - 택배사: {carrier}")
+            if tracking:
+                lines.append(f"   - 송장번호: {tracking}")
+            if shipping_status:
+                lines.append(f"   - 배송 상태: {shipping_status}")
+            if expected:
+                has_expected_arrival = True
+                lines.append(f"   - 도착 예정일: {expected}")
+
+    if has_expected_arrival:
+        lines.append("")
+        lines.append("※ 도착 예정일은 주말·공휴일을 제외한 영업일 기준으로 안내됩니다.")
+
+    if (
+        total_orders is not None
+        and shown_orders is not None
+        and total_orders > shown_orders
+    ):
+        lines.append("")
+        lines.append("다른 주문의 배송 현황도 확인해 드릴까요?")
+
+    return "\n".join(lines)
+
+
+def _reject_cross_user_order_lookup(tc: dict) -> tuple[str, int] | None:
+    """get_order_status에 user_id 인자가 들어오면 즉시 거절한다."""
+    if tc["name"] == "get_order_status" and "user_id" in tc.get("args", {}):
+        logger.warning("get_order_status에 user_id 인자 감지 — 타인 정보 조회 시도 거절")
+        return "__REFUSED__\n사유: other_user_info", 0
+    return None
 
 
 # ── CS 에이전트 실행기 ────────────────────────────────────────────────────────
@@ -200,6 +376,8 @@ class AgentExecutor:
         output_system: str,
         session_id: int | None = None,
         context: RequestContext | None = None,
+        tool_hint: str | None = None,
+        tool_args: dict | None = None,
     ) -> AgentResult:
         ctx = context or RequestContext.build(user_id)
         suffix = ctx.to_system_suffix()
@@ -221,13 +399,112 @@ class AgentExecutor:
             llm_with_tools = primary_with_tools
             output_llm = self.primary
 
-        result = await self._run_single_pass(
-            llm_with_tools, output_llm, tool_map,
-            user_message, history, input_with_ctx, output_with_ctx,
-        )
+        if tool_hint and tool_hint in _DIRECT_HINT_TOOL_NAMES:
+            result = await self._run_with_tool_hint(
+                output_llm, tool_map,
+                user_message, history, output_with_ctx,
+                tool_hint=tool_hint, tool_args=tool_args,
+            )
+        else:
+            if tool_hint:
+                logger.warning("[CS 에이전트] 유효하지 않은 tool_hint=%s — 기존 도구 선택 경로 사용", tool_hint)
+            result = await self._run_single_pass(
+                llm_with_tools, output_llm, tool_map,
+                user_message, history, input_with_ctx, output_with_ctx,
+            )
         # search_faq가 인용한 문서 ID를 결과에 주입 (FaqCitation 저장용)
         result.cited_faq_ids = tool_ctx.cited_faq_ids
         return result
+
+    async def _run_with_tool_hint(
+        self,
+        output_llm,
+        tool_map: dict,
+        user_message: str,
+        history: list[dict],
+        output_system: str,
+        tool_hint: str,
+        tool_args: dict | None,
+    ) -> AgentResult:
+        """Supervisor가 지정한 read-only 도구를 바로 실행해 도구 선택 LLM 호출을 생략."""
+        safe_args = tool_args if isinstance(tool_args, dict) else {}
+        tc = {"name": tool_hint, "args": safe_args, "id": f"hint-{tool_hint}"}
+        guarded = _reject_cross_user_order_lookup(tc)
+        if guarded is not None:
+            result, latency_ms = guarded
+        else:
+            result, latency_ms = await _invoke_tool(tc, tool_map)
+
+        tools_used: list[str] = []
+        trace: list[TraceStep] = []
+        metrics: list[ToolMetricData] = []
+        _record(tc, result, latency_ms, 1, tools_used, trace, metrics)
+
+        if result == LOGIN_REQUIRED_RESPONSE:
+            _log_trace(trace, user_message)
+            return AgentResult(
+                answer=LOGIN_REQUIRED_RESPONSE,
+                intent=TOOL_TO_INTENT.get(tool_hint, "other"),
+                escalated=False,
+                tools_used=tools_used, trace=trace, metrics=metrics,
+            )
+
+        if result.startswith("__REFUSED__"):
+            raw_reason = result.split("사유:", 1)[1].strip() if "사유:" in result else ""
+            _log_trace(trace, user_message)
+            return AgentResult(
+                answer=refusal_response(raw_reason),
+                intent=TOOL_TO_INTENT.get(tool_hint, "other"),
+                escalated=False,
+                tools_used=tools_used, trace=trace, metrics=metrics,
+            )
+
+        if tool_hint == "get_order_status":
+            _log_trace(trace, user_message)
+            return AgentResult(
+                answer=_format_order_status_answer(result),
+                intent=TOOL_TO_INTENT.get(tool_hint, "delivery"),
+                escalated=False,
+                tools_used=tools_used, trace=trace, metrics=metrics,
+            )
+
+        messages: list[BaseMessage] = _history_to_lc(history) + [HumanMessage(content=user_message)]
+        synth_messages = [
+            SystemMessage(content=output_system),
+            *messages,
+            SystemMessage(
+                content=(
+                    "아래 도구 실행 결과만 근거로 고객 답변을 작성하세요.\n"
+                    f"- tool: {tool_hint}\n"
+                    f"- arguments: {safe_args}\n"
+                    f"- result:\n{result}"
+                )
+            ),
+        ]
+        try:
+            synth: AIMessage = await output_llm.ainvoke(synth_messages)
+            raw_answer = synth.content or LLM_GENERATION_FAILED
+        except Exception as e:
+            logger.error("[CS 에이전트] LLM 호출 오류 (hint 응답 생성): %s", e)
+            raise
+
+        has_empty_rag = _is_empty_result(result) and TOOL_SOURCE.get(tool_hint) == "rag"
+        if has_empty_rag:
+            trace.append(TraceStep(
+                tool="_parametric_fallback",
+                arguments={},
+                result="RAG 결과 없음 — LLM 사전 지식으로 보완",
+                iteration=1,
+                source="parametric",
+            ))
+
+        _log_trace(trace, user_message)
+        return AgentResult(
+            answer=_finalize_customer_answer(_parse_answer(raw_answer), trace),
+            intent=TOOL_TO_INTENT.get(tool_hint, "other"),
+            escalated=False,
+            tools_used=tools_used, trace=trace, metrics=metrics,
+        )
 
     async def _run_single_pass(
         self,
@@ -264,7 +541,7 @@ class AgentExecutor:
             raw_answer = response.content or LLM_GENERATION_FAILED
             _log_trace(trace, user_message)
             return AgentResult(
-                answer=_parse_answer(raw_answer),
+                answer=_finalize_customer_answer(_parse_answer(raw_answer), trace),
                 intent="other",
                 escalated=False,
                 tools_used=[],
@@ -297,10 +574,9 @@ class AgentExecutor:
 
         # DB·액션 순차 실행
         for i, tc in other_indexed:
-            # get_order_status에 user_id 인자 감지 → 타인 정보 조회 시도로 즉시 거절
-            if tc["name"] == "get_order_status" and "user_id" in tc.get("args", {}):
-                logger.warning("get_order_status에 user_id 인자 감지 — 타인 정보 조회 시도 거절")
-                result, latency_ms = "__REFUSED__\n사유: other_user_info", 0
+            guarded = _reject_cross_user_order_lookup(tc)
+            if guarded is not None:
+                result, latency_ms = guarded
             else:
                 result, latency_ms = await _invoke_tool(tc, tool_map)
 
@@ -349,12 +625,27 @@ class AgentExecutor:
                 refused_tm.content.split("사유:", 1)[1].strip()
                 if "사유:" in refused_tm.content else ""
             )
-            answer = REFUSED
+            answer = refusal_response(raw_reason)
             logger.info("[CS 에이전트] 거절 바이패스 — reason=%s → '%s'", raw_reason, answer[:40])
             _log_trace(trace, user_message)
             return AgentResult(
                 answer=answer,
                 intent=TOOL_TO_INTENT.get(tools_used[0], "other") if tools_used else "other",
+                escalated=False,
+                tools_used=tools_used, trace=trace, metrics=metrics,
+            )
+
+        # 배송 조회 단일 도구는 LLM 재가공 없이 고객용 고정 포맷으로 반환한다.
+        # 내부 상태값 노출, 불필요한 사과, 근거만 남는 정책 인용을 방지하기 위함이다.
+        if (
+            len(response.tool_calls) == 1
+            and tools_used == ["get_order_status"]
+            and tool_messages[0] is not None
+        ):
+            _log_trace(trace, user_message)
+            return AgentResult(
+                answer=_format_order_status_answer(tool_messages[0].content),
+                intent="delivery",
                 escalated=False,
                 tools_used=tools_used, trace=trace, metrics=metrics,
             )
@@ -390,7 +681,7 @@ class AgentExecutor:
 
         _log_trace(trace, user_message)
         return AgentResult(
-            answer=answer, intent=intent, escalated=escalated,
+            answer=_finalize_customer_answer(answer, trace), intent=intent, escalated=escalated,
             tools_used=tools_used, trace=trace, metrics=metrics,
         )
 

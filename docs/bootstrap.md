@@ -6,6 +6,8 @@
 
 또한 팀 내 다른 요구를 반영해, Windows 래퍼는 '빠른 실행'과 'DB 확인 포함 실행'을 분리해 제공한다.
 
+추가로 GUI 실행이 편한 팀원은 루트의 `Web_Starter.exe`를 사용할 수 있다.
+
 ## 1. 제일 많이 쓰는 명령
 
 ### 1) 빠른 실행
@@ -21,7 +23,20 @@
 - CLI 명령: `python bootstrap.py --initialize`
 - 하는 일: DB 상태 확인(필요 시 재적재) + 의존성 확인/설치 + 서버 실행
 
-### 3) 강제 스키마 재구성(주의)
+### 3) GUI 실행
+
+- 더블클릭 파일: `Web_Starter.exe`
+- 하는 일: 서버 시작 전에 자동화 점검을 수행한 뒤 FarmOS와 쇼핑몰 서버 실행
+- 참고: PostgreSQL은 먼저 실행되어 있어야 하고, `backend/.env`, `shopping_mall/backend/.env`의 DB 접속 정보가 현재 PC와 맞아야 한다.
+
+정상 실행 후 접속 주소:
+
+- FarmOS 백엔드: `http://localhost:8000`
+- FarmOS 프론트엔드: `http://localhost:5173`
+- 쇼핑몰 백엔드: `http://localhost:4000`
+- 쇼핑몰 프론트엔드: `http://localhost:5174`
+
+### 4) 강제 스키마 재구성(주의)
 
 - 실행 방법: `bootstrap.cmd`에 인자 전달
 
@@ -36,7 +51,7 @@ python bootstrap.py --initialize --rebuild-schema
 - 하는 일: DB 초기화 과정에서 스키마 재구성까지 수행
 - 주의: 파괴적 작업이므로 팀 합의 후 사용
 
-### 4) 테이블 초기화 시 상세 정보까지 같이 보기
+### 5) 테이블 초기화 시 상세 정보까지 같이 보기
 
 - 실행 방법: `bootstrap.cmd`에 인자 전달
 
@@ -71,6 +86,8 @@ python bootstrap.py --initialize --verbose-table-info
   - `bootstrap-fast.cmd`
 - 데이터가 뭔가 비어 보인다, 테스트 데이터가 부족하다
   - `bootstrap.cmd`
+- GUI로 한 번에 켜고 싶다
+  - `Web_Starter.exe`
 - 테이블 구조가 꼬였거나 스키마 변경 직후다
   - `bootstrap.cmd --rebuild-schema`
 
@@ -140,7 +157,30 @@ python bootstrap.py --initialize --verbose-table-info
 - `bootstrap/pesticide.py`
   - 농약 RAG 데이터 점검/적재(시드 계열)
 
-## 6. 문제 상황별 대응
+- `bootstrap/apply_shop_updates.py`
+  - 이미 세팅된 서버에 쇼핑몰 후속 보강만 다시 적용
+
+## 6. Web Starter가 추가로 확인하는 항목
+
+- PostgreSQL 접속과 대상 DB 존재 여부
+- SQLAlchemy 모델 기준 테이블/컬럼/row 수
+- 테이블이 없으면 `bootstrap/create_tables.py` 실행
+- 데이터가 부족하면 `bootstrap/insert_data.py` 실행
+- 쇼핑몰 FAQ DB 시딩과 RAG 인덱싱
+- 기존 DB에 `shop_tickets.flags` 컬럼이 없으면 안전하게 추가
+- 쇼핑몰 상품 이미지 URL 보정
+
+쇼핑몰 후속 보강만 다시 적용하려면 루트에서 실행한다.
+
+```bash
+python bootstrap/apply_shop_updates.py
+```
+
+현재 후속 보강 항목:
+
+- `shopping_mall/backend/scripts/update_product_images.py` 매핑 기준으로 `shop_products.thumbnail`, `shop_products.images` 갱신
+
+## 7. 문제 상황별 대응
 
 ### 상황 1) Expected Row Count는 바꿨는데 시드 데이터 수정은 안 했다
 
@@ -197,7 +237,18 @@ python bootstrap.py --initialize --verbose-table-info
 2. `backend/.env`, `shopping_mall/backend/.env`의 `DATABASE_URL` 확인
 3. 필요 시 하위 초기화 스크립트에 `--database-url`을 명시 전달해 검증
 
-## 7. PR 반영 내용
+### 상황 5) ChromaDB 디렉터리 삭제 실패
+
+증상:
+
+- FAQ/RAG 재시딩 중 ChromaDB 디렉터리 삭제 실패
+
+대응:
+
+1. 쇼핑몰 백엔드가 이미 켜져 있으면 종료
+2. 다시 `bootstrap.cmd` 또는 `Web_Starter.exe` 실행
+
+## 8. PR 반영 내용
 
 - `bootstrap.py`에 `--rebuild-schema`를 명시적으로 노출
 - `--rebuild-schema`는 `--initialize`와 함께만 허용
@@ -207,21 +258,22 @@ python bootstrap.py --initialize --verbose-table-info
 - 자동 승격(`TRUNCATE 실패 -> DROP`) 금지
 - 로그 메시지에 "왜 실패했는지"를 더 명확히 표시
 
-## 8. 팀 합의가 필요한 항목
+## 9. 팀 합의가 필요한 항목
 
 - 운영 환경에서 `--rebuild-schema` 허용 여부
 - `lock_timeout` 기본값(예: 5초/10초/30초)
 - 재시도 횟수(권장: 0회 또는 매우 제한)
 - 예상 행 수 기준을 하한(`>=`)으로 볼지, 정확 일치(`==`)로 볼지
 
-## 9. 최종 정리
+## 10. 최종 정리
 
 - 평소에는 `python bootstrap.py`만 사용한다.
 - DB 문제가 있을 때만 `--initialize`를 사용한다.
 - 스키마 재구성은 `--rebuild-schema`를 붙여 명시적으로 실행한다.
 - 실패 시 자동으로 더 파괴적인 작업으로 넘어가지 않는다.
-- Windows 사용자는 아래 두 래퍼로 선택 실행한다.
+- Windows 사용자는 아래 래퍼로 선택 실행한다.
   - 빠른 모드: `bootstrap-fast.cmd`
   - DB 확인 포함 모드: `bootstrap.cmd`
+  - GUI 실행: `Web_Starter.exe`
 
 이 원칙을 기준으로 bootstrap 코드를 단계적으로 정비한다.

@@ -6,15 +6,16 @@ import {
   parseOrderFlowMessage,
   type OrderFlowUI,
 } from './parseOrderFlowMessage';
-import api from '@/lib/api';
 import type { ChatSessionMessage } from './types';
 
 const QUICK_ACTIONS = [
-  { label: '📦 배송 조회', intent: 'delivery', text: '배송 현황을 알고 싶어요' },
-  { label: '🍎 재고 확인', intent: 'stock', text: '재고 확인해 주세요' },
-  { label: '❄️ 보관 방법', intent: 'storage', text: '상품 보관 방법이 궁금해요' },
-  { label: '↩️ 교환/환불', intent: 'exchange', text: '교환/환불하고 싶어요' },
-  { label: '🌸 제철 상품', intent: 'season', text: '요즘 제철 상품이 뭔가요?' },
+  { id: 'delivery', label: '📦 배송 조회', intent: 'delivery', text: '배송 현황을 알고 싶어요' },
+  { id: 'order-change', label: '📝 주문 변경', intent: 'order', text: '주문 변경하고 싶어요' },
+  { id: 'stock', label: '🍎 재고 확인', intent: 'stock', text: '재고 확인해 주세요' },
+  { id: 'storage', label: '❄️ 보관 방법', intent: 'storage', text: '상품 보관 방법이 궁금해요' },
+  { id: 'exchange', label: '↩️ 교환', intent: 'exchange', text: '교환하고 싶어요' },
+  { id: 'refund', label: '💳 환불', intent: 'cancel', text: '환불하고 싶어요' },
+  { id: 'season', label: '🌸 제철 상품', intent: 'season', text: '요즘 제철 상품이 뭔가요?' },
 ];
 
 const WELCOME = {
@@ -35,13 +36,21 @@ function OrderFlowActions({
 }) {
   const [otherInput, setOtherInput] = useState('');
   const [showOtherInput, setShowOtherInput] = useState(false);
+  const [editableInput, setEditableInput] = useState('');
 
   let parsed: OrderFlowUI = null;
   try {
     parsed = parseOrderFlowMessage(text);
   } catch {
-    return null;
+    parsed = null;
   }
+  useEffect(() => {
+    if (parsed?.type === 'editable-input') {
+      setEditableInput(parsed.input.defaultValue);
+    } else {
+      setEditableInput('');
+    }
+  }, [text]);
   if (!parsed) return null;
 
   const base = 'transition-colors disabled:opacity-40 text-sm font-medium';
@@ -49,7 +58,13 @@ function OrderFlowActions({
   const outline = `${base} px-4 py-1.5 border border-gray-300 text-gray-700 rounded-full hover:border-[#03C75A] hover:text-[#03C75A]`;
   const chip = `${base} px-3 py-1.5 border border-[#03C75A]/50 text-[#03C75A] rounded-full hover:bg-[#03C75A]/10`;
   const chipGray = `${base} px-3 py-1.5 border border-gray-300 text-gray-600 rounded-full hover:border-[#03C75A] hover:text-[#03C75A]`;
+  const cancelChip = `${base} px-3 py-1.5 border border-rose-300 text-rose-600 rounded-full hover:bg-rose-50`;
   const card = `${base} w-full text-left px-3 py-2.5 border border-[#03C75A]/30 rounded-xl hover:bg-[#03C75A]/8 text-gray-700`;
+  const cancelButton = (
+    <button onClick={() => onSend('그만')} disabled={disabled} className={cancelChip}>
+      취소
+    </button>
+  );
 
   // CS 핸드오프: 교환 / 반품·환불
   if (parsed.type === 'cs-handoff') {
@@ -68,13 +83,14 @@ function OrderFlowActions({
   // 네 / 아니오
   if (parsed.type === 'confirm') {
     return (
-      <div className="flex gap-2 mt-2">
+      <div className="flex flex-wrap gap-2 mt-2">
         <button onClick={() => onSend('네')} disabled={disabled} className={primary}>
           네
         </button>
         <button onClick={() => onSend('아니오')} disabled={disabled} className={outline}>
           아니오
         </button>
+        {cancelButton}
       </div>
     );
   }
@@ -99,6 +115,9 @@ function OrderFlowActions({
             )}
           </button>
         ))}
+        <div className="flex mt-1">
+          {cancelButton}
+        </div>
       </div>
     );
   }
@@ -129,6 +148,7 @@ function OrderFlowActions({
               </button>
             )
           )}
+          {cancelButton}
         </div>
         {showOtherInput && (
           <div className="flex gap-2 mt-2">
@@ -156,6 +176,38 @@ function OrderFlowActions({
     );
   }
 
+  // 주문 변경 상세 입력 (현재 등록값을 기본값으로 수정)
+  if (parsed.type === 'editable-input') {
+    const value = editableInput;
+    return (
+      <div className="mt-2 space-y-2">
+        {parsed.input.guide && (
+          <p className="text-xs text-gray-500 px-0.5">
+            {parsed.input.guide}
+          </p>
+        )}
+        <textarea
+          value={value}
+          onChange={(e) => setEditableInput(e.target.value)}
+          disabled={disabled}
+          rows={Math.max(2, Math.min(5, value.split('\n').length + 1))}
+          className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-[#03C75A] resize-none disabled:opacity-50"
+          aria-label={parsed.input.label}
+        />
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => { if (value.trim()) onSend(value.trim()); }}
+            disabled={!value.trim() || disabled}
+            className="px-4 py-1.5 bg-[#03C75A] text-white text-sm font-medium rounded-full hover:bg-[#02b050] disabled:opacity-40"
+          >
+            전송
+          </button>
+          {cancelButton}
+        </div>
+      </div>
+    );
+  }
+
   // 교환 품목 선택 (전체 선택 버튼 + 직접 입력 안내)
   if (parsed.type === 'item-select') {
     return (
@@ -171,6 +223,9 @@ function OrderFlowActions({
             <span className="ml-2 text-[#03C75A] text-xs font-semibold">전체 선택</span>
           </button>
         ))}
+        <div className="flex mt-1">
+          {cancelButton}
+        </div>
         <p className="text-xs text-gray-400 mt-0.5 px-0.5">
           일부 수량만 교환하려면 직접 입력하세요
         </p>
@@ -192,7 +247,7 @@ interface ChatMessageViewProps {
 export default function ChatMessageView({ sessionId, userId, onBackClick }: ChatMessageViewProps) {
   const { data: sessionMessages = [] } = useSessionMessages(sessionId, userId);
   const { data: session } = useGetSession(sessionId, userId);
-  const { mutate: send, isPending } = useSendMessage();
+  const { mutate: send, isPending, isSuccess: sendSuccess } = useSendMessage();
   const { mutate: closeSession, isPending: isClosing } = useCloseSession();
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatSessionMessage[]>([WELCOME]);
@@ -215,9 +270,19 @@ export default function ChatMessageView({ sessionId, userId, onBackClick }: Chat
     );
   };
 
+  // 세션이 바뀌면 초기화
   useEffect(() => {
-    setMessages(sessionMessages.length === 0 ? [WELCOME] : sessionMessages);
-  }, [sessionMessages]);
+    setMessages([WELCOME]);
+  }, [sessionId]);
+
+  // 캐시에 새 메시지가 생겼을 때만 반영 — 롤백(캐시 길이 감소)은 무시해서
+  // onError 롤백이 로컬 낙관적 메시지(사용자 질문 + 에러 알림)를 덮어쓰지 않도록 함.
+  // sendSuccess가 true면 이전 onError로 로컬 messages가 길어진 경우에도 서버 응답을 반영.
+  useEffect(() => {
+    if (sessionMessages.length >= messages.length || sendSuccess) {
+      setMessages(sessionMessages.length === 0 ? [WELCOME] : sessionMessages);
+    }
+  }, [sessionMessages, sendSuccess]); // messages는 의도적으로 제외 (업데이트 루프 방지)
 
   useEffect(() => {
     if (messagesContainerRef.current) {
@@ -373,7 +438,7 @@ export default function ChatMessageView({ sessionId, userId, onBackClick }: Chat
         >
           {QUICK_ACTIONS.map((action) => (
             <button
-              key={action.intent}
+              key={action.id}
               onClick={() => handleSend(action.text, action.intent)}
               disabled={isPending}
               className="shrink-0 text-xs px-2.5 py-1.5 rounded-full border border-gray-200 text-gray-600 hover:border-[#03C75A] hover:text-[#03C75A] transition-colors disabled:opacity-40"

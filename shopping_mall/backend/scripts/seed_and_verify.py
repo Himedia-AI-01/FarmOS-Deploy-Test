@@ -24,9 +24,8 @@ VERIFY_QUERIES: dict[str, str] = {
     "quality_policy":    "상품 신선도 보장돼요?",
     "service_policy":    "고객센터 운영시간이 어떻게 돼요?",
     "membership_policy": "회원 탈퇴하려면 어떻게 해요?",
-    "faq":               "자주 묻는 질문이 뭐가 있어요?",
-    "storage_guide":     "딸기 보관 어떻게 해요?",
-    "season_info":       "제철 농산물이 뭐예요?",
+    # faq 컬렉션에는 FAQ·보관법(storage)·제철정보(season)·농장소개(farm-info)가 통합됨
+    "faq":               "딸기 보관 어떻게 해요?",
 }
 
 SEP = "=" * 60
@@ -109,7 +108,7 @@ def main():
     if all_pass:
         print("  모든 컬렉션 검색 통과.")
     else:
-        print("  일부 컬렉션 검색 실패. Ollama 실행 여부 및 시딩 상태를 확인하세요.")
+        print("  일부 컬렉션 검색 실패. EMBED_PROVIDER 설정 및 시딩 상태를 확인하세요.")
 
     print()
     print(SEP)

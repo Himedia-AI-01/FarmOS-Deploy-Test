@@ -55,6 +55,7 @@ from app.models import (
     WeeklyReport,
     Wishlist,
 )
+from scripts.update_product_images import PRODUCT_IMAGE_SPECS, _build_images
 
 # =========================
 # 수정이 쉬운 상단 설정값
@@ -77,6 +78,7 @@ EXPECTED_ROW_COUNTS = {
     "shop_weekly_reports": 2,
     "shop_customer_segments": 5,
     "shop_chat_logs": 5,
+    "shop_faq_categories": 10,
 }
 SHOP_TABLES = [
     "shop_categories",
@@ -96,6 +98,7 @@ SHOP_TABLES = [
     "shop_customer_segments",
     "shop_chat_logs",
     "shop_chat_sessions",
+    "shop_faq_categories",
 ]
 # shop_reviews는 1000건이 정상 상태(shoppingmall_review_seed.py 적재 후)
 READY_ROW_COUNTS = {
@@ -297,6 +300,12 @@ def seed_core_data(db) -> SeedState:
 
     products: list[Product] = []
     for i, name in enumerate(PRODUCT_NAMES, start=1):
+        image_spec = PRODUCT_IMAGE_SPECS[i]
+        if image_spec.name != name:
+            raise ValueError(
+                f"상품 이미지 매핑 불일치: id={i}, seed={name!r}, image_spec={image_spec.name!r}"
+            )
+        thumbnail, images = _build_images(i)
         category_id = PRODUCT_CATEGORY_BY_ID[i - 1]
         store_id = PRODUCT_STORE_BY_ID[i - 1]
         price = _product_price(i)
@@ -313,14 +322,8 @@ def seed_core_data(db) -> SeedState:
             rating=round(4.2 + (i % 7) * 0.1, 1),
             review_count=10 + (i % 90),
             sales_count=50 + (i * 9),
-            thumbnail=f"https://picsum.photos/seed/product{i}/400/400",
-            images=json.dumps(
-                [
-                    f"https://picsum.photos/seed/product{i}a/600/600",
-                    f"https://picsum.photos/seed/product{i}b/600/600",
-                    f"https://picsum.photos/seed/product{i}c/600/600",
-                ]
-            ),
+            thumbnail=thumbnail,
+            images=images,
             options=json.dumps(["기본"]),
             created_at=now - timedelta(days=42 - i),
         )

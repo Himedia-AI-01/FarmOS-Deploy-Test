@@ -84,6 +84,110 @@ export const PRESET_COLORS: { label: string; value: string }[] = [
   { label: '회색',     value: 'bg-stone-100 text-stone-700' },     // neutral — 일반·기타
 ];
 
+// ──────────────────────────────────────────
+// FAQ Analytics Types
+// ──────────────────────────────────────────
+
+export interface UnansweredSample {
+  id: number;
+  question: string;
+  intent: string;
+  created_at: string;
+}
+
+export interface LeastCitedFaqItem {
+  id: number;
+  title: string;
+  category_name: string | null;
+  category_slug: string | null;
+  citation_count: number;
+  created_at: string;
+}
+
+export interface TopCitedFaqItem {
+  id: number;
+  title: string;
+  citation_count: number;
+  category_name: string | null;
+}
+
+export interface FaqActionSummary {
+  total_docs: number;
+  active_docs: number;
+  unanswered_count: number;
+  underperforming_count: number;
+}
+
+export interface TrendingQuestionItem {
+  intent: string;
+  intent_label: string;
+  count: number;
+  sample_question: string;
+}
+
+export interface TrendingQuestionsResponse {
+  period_days: number;
+  total_questions: number;
+  items: TrendingQuestionItem[];
+}
+
+// ──────────────────────────────────────────
+// FAQ 등록 추천 (faq-recommendations)
+// ──────────────────────────────────────────
+
+/** 갭 유형: FAQ 자체가 없었던 경우 vs 처리 완전 불가 */
+export type FaqGapType = 'missing' | 'escalated';
+
+export interface FaqRecommendationItem {
+  rank: number;
+  representative_question: string; // 대표 질문 원문 (가장 최근)
+  count: number;                   // 같은 질문이 들어온 총 수
+  recent_count: number;            // 최근 7일 수
+  escalated_count: number;
+  gap_type: FaqGapType;
+  score: number;
+  top_intent: string;
+  top_intent_label: string;        // 주요 intent 한글 레이블
+}
+
+export interface FaqRecommendationsResponse {
+  period_days: number;
+  total_gap_questions: number;
+  items: FaqRecommendationItem[];
+}
+
+// ──────────────────────────────────────────
+// FAQ 초안 자동 생성 (AI draft generation)
+// ──────────────────────────────────────────
+
+export interface FaqDraftRequest {
+  representative_question: string;
+  top_intent: string;
+  gap_type: FaqGapType;
+  count: number;
+  escalated_count: number;
+}
+
+export interface FaqDraftResponse {
+  title: string;
+  content: string;
+  suggested_category_id: number | null;
+  suggested_category_slug: string | null;
+  model_used: string;
+  citation_doc: string | null;
+  citation_chapter: string | null;
+  citation_article: string | null;
+  citation_clause: string | null;
+}
+
+export interface PolicyArticleItem {
+  chapter: string;  // "제1장 반품·교환·환불" or "" for uncategorized
+  article: string;
+  clauses: string[];
+}
+
+// ──────────────────────────────────────────
+
 export const PRESET_ICONS: { label: string; value: string }[] = [
   { label: '물음표',    value: 'help' },
   { label: '배송',      value: 'local_shipping' },

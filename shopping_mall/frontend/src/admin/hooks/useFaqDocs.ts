@@ -7,6 +7,15 @@ import type {
   FaqCategory,
   FaqCategoryCreate,
   FaqCategoryUpdate,
+  UnansweredSample,
+  LeastCitedFaqItem,
+  TopCitedFaqItem,
+  FaqActionSummary,
+  TrendingQuestionsResponse,
+  FaqRecommendationsResponse,
+  FaqDraftRequest,
+  FaqDraftResponse,
+  PolicyArticleItem,
 } from '@/admin/types/faq';
 
 // ──────────────────────────────────────────
@@ -20,6 +29,15 @@ const KEYS = {
   docs: ['admin-faq-docs'] as const,
   list: (filters: FaqListFilters) => ['admin-faq-docs', 'list', filters] as const,
   detail: (id: number) => ['admin-faq-docs', 'detail', id] as const,
+  unansweredSamples: (limit: number) => ['admin-faq-analytics', 'unanswered-samples', limit] as const,
+  leastCited: (limit: number) => ['admin-faq-analytics', 'least-cited', limit] as const,
+  topCited: (limit: number) => ['admin-faq-analytics', 'top-cited', limit] as const,
+  actionSummary: ['admin-faq-analytics', 'action-summary'] as const,
+  trendingQuestions: (days: number, limit: number) =>
+    ['admin-faq-analytics', 'trending-questions', days, limit] as const,
+  faqRecommendations: (days: number, limit: number) =>
+    ['admin-faq-analytics', 'faq-recommendations', days, limit] as const,
+  policyArticles: (doc: string) => ['admin-faq-analytics', 'policy-articles', doc] as const,
 };
 
 // ──────────────────────────────────────────
@@ -179,5 +197,112 @@ export function useToggleFaqActive() {
       queryClient.invalidateQueries({ queryKey: KEYS.detail(id) });
       queryClient.invalidateQueries({ queryKey: KEYS.categories });
     },
+  });
+}
+
+// ──────────────────────────────────────────
+// FAQ Analytics Hooks
+// ──────────────────────────────────────────
+
+export function useFaqActionSummary() {
+  return useQuery<FaqActionSummary>({
+    queryKey: KEYS.actionSummary,
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/faq-analytics/action-summary');
+      return data;
+    },
+    staleTime: 30_000,
+  });
+}
+
+export function useFaqUnansweredSamples(limit = 10) {
+  return useQuery<UnansweredSample[]>({
+    queryKey: KEYS.unansweredSamples(limit),
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/faq-analytics/unanswered-samples', {
+        params: { limit },
+      });
+      return data;
+    },
+    staleTime: 30_000,
+  });
+}
+
+export function useFaqLeastCited(limit = 5) {
+  return useQuery<LeastCitedFaqItem[]>({
+    queryKey: KEYS.leastCited(limit),
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/faq-analytics/least-cited', {
+        params: { limit },
+      });
+      return data;
+    },
+    staleTime: 30_000,
+  });
+}
+
+export function useFaqTopCited(limit = 5) {
+  return useQuery<TopCitedFaqItem[]>({
+    queryKey: KEYS.topCited(limit),
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/faq-analytics/top-cited', {
+        params: { limit },
+      });
+      return data;
+    },
+    staleTime: 30_000,
+  });
+}
+
+export function useFaqTrendingQuestions(days = 7, limit = 5) {
+  return useQuery<TrendingQuestionsResponse>({
+    queryKey: KEYS.trendingQuestions(days, limit),
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/faq-analytics/trending-questions', {
+        params: { days, limit },
+      });
+      return data;
+    },
+    staleTime: 60_000,
+  });
+}
+
+/**
+ * FAQ 등록 추천 후보 — FAQ 갭(미인용+에스컬레이션) 기반으로 1·2·3위를 반환합니다.
+ * FaqPage의 "이번 주 트렌딩" 카드에서 사용합니다.
+ */
+export function useFaqRecommendations(days = 30, limit = 3) {
+  return useQuery<FaqRecommendationsResponse>({
+    queryKey: KEYS.faqRecommendations(days, limit),
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/faq-analytics/faq-recommendations', {
+        params: { days, limit },
+      });
+      return data;
+    },
+    staleTime: 60_000,
+  });
+}
+
+export function useGenerateFaqDraft() {
+  return useMutation<FaqDraftResponse, Error, FaqDraftRequest>({
+    mutationFn: async (req) => {
+      const { data } = await api.post('/api/admin/faq-analytics/generate-draft', req);
+      return data;
+    },
+  });
+}
+
+export function usePolicyArticles(doc: string) {
+  return useQuery<PolicyArticleItem[]>({
+    queryKey: KEYS.policyArticles(doc),
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/faq-analytics/policy-articles', {
+        params: { doc },
+      });
+      return data;
+    },
+    enabled: !!doc,
+    staleTime: 5 * 60 * 1000,
   });
 }

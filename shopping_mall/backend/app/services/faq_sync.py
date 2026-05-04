@@ -37,11 +37,13 @@ if TYPE_CHECKING:
 try:
     from ai.utils import tokenize_ko
 except ImportError:
-    # 폴백: 로컬 정의
-    def tokenize_ko(text: str) -> list[str]:
-        """한국어 정규식 토크나이저 (로컬 폴백)."""
-        tokens = re.findall(r"[가-힣a-zA-Z0-9]+", text.lower())
-        return tokens if tokens else [text.lower()]
+    # 폴백: ai.utils 임포트 실패 시 로컬 정의 (ai/utils.py와 동일 로직 유지)
+    import re as _re
+
+    def tokenize_ko(text: str) -> list[str]:  # type: ignore[misc]
+        """한국어 정규식 토크나이저 (로컬 폴백 — ai/utils.py와 동기화 필요)."""
+        tokens = _re.findall(r"[가-힣a-zA-Z0-9]+", text.lower())
+        return [t for t in tokens if len(t) >= 2] or [text.lower()]
 
 logger = logging.getLogger(__name__)
 

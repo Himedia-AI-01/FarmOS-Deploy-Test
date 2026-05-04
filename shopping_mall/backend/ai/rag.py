@@ -441,12 +441,14 @@ class RAGService:
         top_k: int = 5,
         distance_threshold: float = 0.5,
         rrf_k: int = 60,
+        dense_weight: float = 2.0,
+        bm25_weight: float = 1.0,
     ) -> list[str]:
         """Dense (ChromaDB) + Sparse (BM25) 하이브리드 검색 with RRF 합산.
 
         1. Dense: retrieve_with_scores()로 각 컬렉션 검색
         2. Sparse: BM25 인덱스에서 대상 컬렉션 필터링 후 Top-K
-        3. RRF: 두 랭킹의 역순위(1/(k+rank)) 합산 → 최종 정렬
+        3. RRF: 두 랭킹의 가중 역순위(w/(k+rank)) 합산 → 최종 정렬
 
         BM25 인덱스가 없으면 Dense 결과만 반환 (graceful degradation).
 
@@ -456,7 +458,16 @@ class RAGService:
             top_k: 최종 반환 문서 수
             distance_threshold: Dense 검색 거리 필터
             rrf_k: RRF 하이퍼파라미터 (기본값 60 — 표준)
+            dense_weight: Dense 랭킹 가중치 (기본값 2.0 — BM25보다 Dense 우선)
+            bm25_weight: BM25 랭킹 가중치 (기본값 1.0)
         """
+        if not isinstance(dense_weight, (int, float)) or dense_weight < 0:
+            raise ValueError(f"dense_weight must be a non-negative number, got {dense_weight!r}")
+        if not isinstance(bm25_weight, (int, float)) or bm25_weight < 0:
+            raise ValueError(f"bm25_weight must be a non-negative number, got {bm25_weight!r}")
+        if not isinstance(rrf_k, (int, float)) or rrf_k <= 0:
+            raise ValueError(f"rrf_k must be a positive number, got {rrf_k!r}")
+
         col_set = set(collections)
 
         # ── Dense 검색 ────────────────────────────────────────────────────────
@@ -513,12 +524,12 @@ class RAGService:
                 except Exception as e:
                     logger.warning("BM25 문서 조회 실패 (%s): %s", col_name, e)
 
-        # ── RRF 합산 ─────────────────────────────────────────────────────────
+        # ── RRF 합산 (가중치 적용) ────────────────────────────────────────────
         rrf: dict[str, float] = {}
         for rank, (doc, _) in enumerate(dense):
-            rrf[doc] = rrf.get(doc, 0.0) + 1.0 / (rrf_k + rank)
+            rrf[doc] = rrf.get(doc, 0.0) + dense_weight / (rrf_k + rank)
         for rank, doc in enumerate(bm25_docs):
-            rrf[doc] = rrf.get(doc, 0.0) + 1.0 / (rrf_k + rank)
+            rrf[doc] = rrf.get(doc, 0.0) + bm25_weight / (rrf_k + rank)
 
         return sorted(rrf, key=lambda d: rrf[d], reverse=True)[:top_k]
 

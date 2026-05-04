@@ -13,7 +13,7 @@ from app.models.chat_session import ChatSession
 from app.models.ticket import ShopTicket
 from app.models.tool_metric import ToolMetric
 from app.schemas.chatlog import (
-    ChatQuestion, ChatAnswer, ChatLogResponse, ChatRating,
+    ChatQuestion, ChatAnswer, ChatLogResponse,
     ToolAnalyticsItem, ToolAnalyticsResponse,
 )
 from app.schemas.chat_session import ChatSessionCreate, ChatSessionResponse, ChatSessionMessages
@@ -36,7 +36,10 @@ def set_chatbot_service(service: MultiAgentChatbotService) -> None:
 
 def _get_chatbot_service() -> MultiAgentChatbotService:
     if _chatbot_service_instance is None:
-        raise RuntimeError("Chatbot service not initialized. Check app startup.")
+        raise HTTPException(
+            status_code=503,
+            detail="챗봇 서비스가 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.",
+        )
     return _chatbot_service_instance
 
 
@@ -73,6 +76,7 @@ def _get_current_user_id_optional(
     return None
 
 
+
 @router.post("/ask", response_model=ChatAnswer)
 async def ask_question(
     body: ChatQuestion,
@@ -81,6 +85,25 @@ async def ask_question(
     debug: bool = Query(False, description="true 시 추론 trace 포함 반환"),
 ):
     """Submit a question to the AI chatbot."""
+    try:
+        return await _ask_question_inner(body, authenticated_user_id, db, debug)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "챗봇 요청 처리 중 예기치 않은 오류: %s: %s",
+            type(e).__name__, e, exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="챗봇 서비스에 일시적인 문제가 발생했습니다.")
+
+
+async def _ask_question_inner(
+    body: ChatQuestion,
+    authenticated_user_id: int | None,
+    db: Session,
+    debug: bool,
+) -> ChatAnswer:
+    """실제 챗봇 처리 로직."""
     # Guest request: no session validation needed
     if body.session_id is None:
         service = _get_chatbot_service()
@@ -191,25 +214,6 @@ def list_escalated_logs(
         .order_by(ChatLog.created_at.desc())
         .all()
     )
-
-
-@router.put("/logs/{log_id}/rating", response_model=ChatLogResponse)
-def rate_chat_log(
-    log_id: int,
-    body: ChatRating,
-    authenticated_user_id: int = Depends(_get_current_user_id),
-    db: Session = Depends(get_db),
-):
-    """Rate a chatbot answer."""
-    log = db.query(ChatLog).filter(ChatLog.id == log_id).first()
-    if not log:
-        raise HTTPException(status_code=404, detail="Chat log not found")
-    if log.user_id != authenticated_user_id:
-        raise HTTPException(status_code=403, detail="다른 사용자의 로그에 별점을 남길 수 없습니다.")
-    log.rating = body.rating
-    db.commit()
-    db.refresh(log)
-    return log
 
 
 # ===== Session Management Endpoints =====

@@ -11,6 +11,8 @@ from .nodes import (
     check_stock,
     get_reason,
     get_refund_method,
+    get_change_type,
+    get_change_detail,
     show_summary,
     create_ticket,
     handle_flow_cancel,
@@ -34,6 +36,8 @@ def build_order_graph(checkpointer) -> "CompiledStateGraph":
     builder.add_node("check_stock",        check_stock)
     builder.add_node("get_reason",         get_reason)
     builder.add_node("get_refund_method",  get_refund_method)
+    builder.add_node("get_change_type",    get_change_type)
+    builder.add_node("get_change_detail",  get_change_detail)
     builder.add_node("show_summary",       show_summary)
     builder.add_node("create_ticket",      create_ticket)
     builder.add_node("handle_flow_cancel", handle_flow_cancel)
@@ -44,13 +48,14 @@ def build_order_graph(checkpointer) -> "CompiledStateGraph":
     builder.add_edge(START, "route_action")
     builder.add_edge("route_action", "list_orders")
 
-    # list_orders → 취소: get_reason / 교환: select_items / abort: handle_flow_cancel
+    # list_orders → 취소: get_reason / 교환: select_items / 변경: get_change_type
     builder.add_conditional_edges(
         "list_orders",
         route_after_list_orders,
         {
             "get_reason":         "get_reason",
             "select_items":       "select_items",
+            "get_change_type":    "get_change_type",
             "handle_flow_cancel": "handle_flow_cancel",
         },
     )
@@ -87,6 +92,24 @@ def build_order_graph(checkpointer) -> "CompiledStateGraph":
     # get_refund_method → show_summary / abort: handle_flow_cancel
     builder.add_conditional_edges(
         "get_refund_method",
+        route_abort_check,
+        {
+            "handle_flow_cancel": "handle_flow_cancel",
+            "__continue__":       "show_summary",
+        },
+    )
+
+    # 주문 변경 플로우: 변경 유형 → 변경 상세 → 최종 확인
+    builder.add_conditional_edges(
+        "get_change_type",
+        route_abort_check,
+        {
+            "handle_flow_cancel": "handle_flow_cancel",
+            "__continue__":       "get_change_detail",
+        },
+    )
+    builder.add_conditional_edges(
+        "get_change_detail",
         route_abort_check,
         {
             "handle_flow_cancel": "handle_flow_cancel",

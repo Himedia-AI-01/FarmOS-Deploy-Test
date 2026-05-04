@@ -70,7 +70,7 @@ export default function RevenueChart({ data }: RevenueChartProps) {
             <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f5" vertical={false} />
             <XAxis
               dataKey="date"
-              tick={{ fontSize: 10, fontWeight: 700, fill: '#a8a29e', textTransform: 'uppercase' }}
+              tick={{ fontSize: 10, fontWeight: 700, fill: '#a8a29e' }}
               axisLine={false}
               tickLine={false}
             />

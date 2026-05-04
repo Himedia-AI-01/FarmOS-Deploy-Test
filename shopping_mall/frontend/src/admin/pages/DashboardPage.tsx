@@ -9,10 +9,12 @@ import {
   TICKET_STATUS_COLOR,
   TICKET_ACTION_LABEL,
   TICKET_ACTION_COLOR,
+  TICKET_FLAG_COLOR,
 } from '@/admin/types/ticket';
 import { useTickets } from '@/admin/hooks/useTickets';
 import type { ChatLog } from '@/admin/types/chatlog';
-import { useState } from 'react';
+import type { Ticket, TicketFlag } from '@/admin/types/ticket';
+import { useMemo, useState } from 'react';
 
 // ──────────────────────────────────────────
 // Alert Banner
@@ -107,6 +109,7 @@ interface TicketRowProps {
   statusClass: string;
   actionLabel: string;
   actionClass: string;
+  flags?: TicketFlag[];
 }
 
 function TicketRow({
@@ -118,6 +121,7 @@ function TicketRow({
   statusClass,
   actionLabel,
   actionClass,
+  flags = [],
 }: TicketRowProps) {
   return (
     <div className="p-5 hover:bg-stone-50/50 transition-colors flex gap-4">
@@ -132,16 +136,55 @@ function TicketRow({
           <span className="text-[10px] text-stone-400 whitespace-nowrap shrink-0">{timeAgo}</span>
         </div>
         <p className="text-xs text-stone-500 line-clamp-1">{preview}</p>
-        <div className="flex items-center gap-2 mt-1.5">
+        <div className="flex flex-wrap items-center gap-2 mt-1.5">
           <span className={`px-2 py-0.5 text-[10px] font-bold rounded-md ${actionClass}`}>
             {actionLabel}
           </span>
           <span className={`px-2 py-0.5 text-[10px] font-bold rounded-md ${statusClass}`}>
             {statusLabel}
           </span>
+          {flags.map((flag) => (
+            <span
+              key={flag.code}
+              className={`px-2 py-0.5 text-[10px] font-bold rounded-md ${TICKET_FLAG_COLOR[flag.severity]}`}
+            >
+              {flag.label}
+            </span>
+          ))}
         </div>
       </div>
     </div>
+  );
+}
+
+interface OpsMetricProps {
+  icon: string;
+  label: string;
+  value: string;
+  tone: 'normal' | 'warning' | 'danger';
+  to: string;
+}
+
+function OpsMetric({ icon, label, value, tone, to }: OpsMetricProps) {
+  const toneClass = {
+    normal: 'bg-white border-stone-200 text-stone-700',
+    warning: 'bg-amber-50 border-amber-300 text-amber-800',
+    danger: 'bg-rose-50 border-rose-300 text-rose-800',
+  }[tone];
+
+  return (
+    <NavLink
+      to={to}
+      className={`flex items-center gap-3 rounded-xl border px-4 py-3 transition-colors hover:bg-white ${toneClass}`}
+    >
+      <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
+        {icon}
+      </span>
+      <div>
+        <p className="text-[11px] font-bold text-stone-500">{label}</p>
+        <p className="text-lg font-black tabular-nums">{value}</p>
+      </div>
+    </NavLink>
   );
 }
 
@@ -207,6 +250,7 @@ function EscalationCard({ log, variant }: EscalationCardProps) {
 const ACTION_ICON_MAP: Record<string, string> = {
   cancel: 'undo',
   exchange: 'swap_horiz',
+  change: 'edit_note',
 };
 
 export default function DashboardPage() {
@@ -219,6 +263,15 @@ export default function DashboardPage() {
   const [dismissedTickets, setDismissedTickets] = useState(false);
 
   const pendingTickets = (ticketStats?.received ?? 0) + (ticketStats?.processing ?? 0);
+  const flaggedTickets = useMemo(
+    () => recentTickets.filter((ticket: Ticket) => (ticket.flags ?? []).length > 0).length,
+    [recentTickets],
+  );
+
+  // 에스컬레이션된 고유 세션 수 — AdminLayout과 동일 기준
+  const escalatedSessionCount = new Set(
+    escalated.map((l: ChatLog) => l.session_id).filter((id: number | null): id is number => id != null),
+  ).size;
 
   if (isLoading) {
     return (
@@ -276,7 +329,7 @@ export default function DashboardPage() {
               variant="error"
               icon="priority_high"
               title="에스컬레이션 알림"
-              message={`${escalated.length}건의 긴급 문의가 상담원 연결을 대기 중입니다.`}
+              message={`${escalatedSessionCount}건의 긴급 문의가 상담원 연결을 대기 중입니다.`}
               linkTo="/admin/chatbot"
               onDismiss={() => setDismissedEscalation(true)}
             />
@@ -332,6 +385,30 @@ export default function DashboardPage() {
         />
       </div>
 
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <OpsMetric
+          icon="support_agent"
+          label="상담원 확인 필요"
+          value={`${escalatedSessionCount}건`}
+          tone={escalatedSessionCount > 0 ? 'danger' : 'normal'}
+          to="/admin/chatbot"
+        />
+        <OpsMetric
+          icon="confirmation_number"
+          label="처리 중인 티켓"
+          value={`${pendingTickets}건`}
+          tone={pendingTickets > 0 ? 'warning' : 'normal'}
+          to="/admin/tickets"
+        />
+        <OpsMetric
+          icon="priority_high"
+          label="운영 플래그"
+          value={`${flaggedTickets}건`}
+          tone={flaggedTickets > 0 ? 'warning' : 'normal'}
+          to="/admin/tickets"
+        />
+      </div>
+
       {/* ── Charts ── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-2">
@@ -369,7 +446,7 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="divide-y divide-stone-50">
-              {recentTickets.map((ticket) => (
+              {recentTickets.map((ticket: Ticket) => (
                 <TicketRow
                   key={ticket.id}
                   icon={ACTION_ICON_MAP[ticket.action_type] ?? 'chat_bubble'}
@@ -380,6 +457,7 @@ export default function DashboardPage() {
                   statusClass={TICKET_STATUS_COLOR[ticket.status]}
                   actionLabel={TICKET_ACTION_LABEL[ticket.action_type]}
                   actionClass={TICKET_ACTION_COLOR[ticket.action_type]}
+                  flags={ticket.flags}
                 />
               ))}
             </div>
@@ -391,9 +469,9 @@ export default function DashboardPage() {
           <div className="p-6 border-b border-stone-50 flex justify-between items-center">
             <h3 className="font-bold text-stone-900">
               에스컬레이션 알림
-              {escalated.length > 0 && (
+              {escalatedSessionCount > 0 && (
                 <span className="ml-2 text-xs bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-bold">
-                  {escalated.length}건
+                  {escalatedSessionCount}건
                 </span>
               )}
             </h3>
@@ -423,7 +501,7 @@ export default function DashboardPage() {
                 <p className="text-sm text-stone-400">미처리 에스컬레이션 없음</p>
               </div>
             ) : (
-              escalated.slice(0, 5).map((log, idx) => (
+              escalated.slice(0, 5).map((log: ChatLog, idx: number) => (
                 <EscalationCard
                   key={log.id}
                   log={log}

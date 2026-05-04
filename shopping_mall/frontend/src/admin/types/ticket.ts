@@ -1,5 +1,12 @@
 export type TicketStatus = 'received' | 'processing' | 'completed' | 'cancelled';
-export type TicketActionType = 'cancel' | 'exchange';
+export type TicketActionType = 'cancel' | 'exchange' | 'change';
+export type TicketFlagSeverity = 'info' | 'warning' | 'danger';
+
+export interface TicketFlag {
+  code: string;
+  label: string;
+  severity: TicketFlagSeverity;
+}
 
 export interface TicketItem {
   item_id: number;
@@ -47,6 +54,7 @@ export interface Ticket {
   created_at: string;
   user_name: string | null;
   order_total: number | null;
+  flags: TicketFlag[];
 }
 
 export interface TicketStats {
@@ -57,6 +65,7 @@ export interface TicketStats {
   total: number;
   exchange: number;
   cancel: number;
+  change: number;
 }
 
 export const TICKET_STATUS_LABEL: Record<TicketStatus, string> = {
@@ -76,9 +85,17 @@ export const TICKET_STATUS_COLOR: Record<TicketStatus, string> = {
 export const TICKET_ACTION_LABEL: Record<TicketActionType, string> = {
   cancel: '취소',
   exchange: '교환',
+  change: '변경',
 };
 
 export const TICKET_ACTION_COLOR: Record<TicketActionType, string> = {
   cancel:   'bg-rose-50 text-rose-700',     // tertiary (#BD4E61)
   exchange: 'bg-emerald-50 text-emerald-700', // primary (#008542)
+  change:   'bg-amber-50 text-amber-700',
+};
+
+export const TICKET_FLAG_COLOR: Record<TicketFlagSeverity, string> = {
+  info:    'bg-white text-stone-700 border border-stone-300',
+  warning: 'bg-amber-50 text-amber-700 border border-amber-300',
+  danger:  'bg-rose-50 text-rose-700 border border-rose-300',
 };

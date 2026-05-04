@@ -190,6 +190,73 @@ PRODUCT_NAMES = [
     "흙당근 2kg",
 ]
 
+
+@dataclass(frozen=True)
+class ProductImageSpec:
+    name: str
+    keywords: str
+    lock: int
+
+
+PRODUCT_IMAGE_SPECS: dict[int, ProductImageSpec] = {
+    1: ProductImageSpec("경북 부사 사과 5kg", "red-apple,fruit", 101),
+    2: ProductImageSpec("충남 신고배 7.5kg", "asian-pear,fruit", 102),
+    3: ProductImageSpec("청송 꿀사과 3kg", "apple,orchard", 103),
+    4: ProductImageSpec("나주배 선물세트 5kg", "pear,fruit", 104),
+    5: ProductImageSpec("홍로사과 2kg", "red-apple,orchard", 105),
+    6: ProductImageSpec("제주 감귤 5kg", "tangerine,citrus", 106),
+    7: ProductImageSpec("제주 한라봉 3kg", "orange,citrus", 107),
+    8: ProductImageSpec("카라카라 오렌지 2kg", "orange,fruit", 108),
+    9: ProductImageSpec("천혜향 2kg", "mandarin,citrus", 109),
+    10: ProductImageSpec("레드향 3kg", "orange,citrus-fruit", 110),
+    11: ProductImageSpec("유기농 상추 300g", "lettuce,vegetable", 111),
+    12: ProductImageSpec("깻잎 100매", "perilla,leaf,vegetable", 112),
+    13: ProductImageSpec("시금치 500g", "spinach,vegetable", 113),
+    14: ProductImageSpec("배추 1포기", "napa-cabbage,vegetable", 114),
+    15: ProductImageSpec("청경채 200g", "bok-choy,vegetable", 115),
+    16: ProductImageSpec("감자 3kg", "potato,vegetable", 116),
+    17: ProductImageSpec("고구마 3kg", "sweet-potato,vegetable", 117),
+    18: ProductImageSpec("당근 1kg", "carrot,vegetable", 118),
+    19: ProductImageSpec("양파 3kg", "onion,vegetable", 119),
+    20: ProductImageSpec("무 1개", "radish,vegetable", 120),
+    21: ProductImageSpec("한우 등심 1++ 300g", "steak,beef", 1),
+    22: ProductImageSpec("한우 갈비살 500g", "beef-ribs,meat", 122),
+    23: ProductImageSpec("한우 채끝 200g", "beef-steak,raw-meat", 123),
+    24: ProductImageSpec("한우 불고기용 300g", "sliced-beef,meat", 124),
+    25: ProductImageSpec("한우 사골 2kg", "beef-bone,soup", 125),
+    26: ProductImageSpec("제주 흑돼지 삼겹살 500g", "pork-belly,meat", 126),
+    27: ProductImageSpec("목살 구이용 500g", "pork,meat", 127),
+    28: ProductImageSpec("돼지갈비 양념 1kg", "pork-ribs,meat", 128),
+    29: ProductImageSpec("노르웨이 생연어 300g", "salmon,seafood", 129),
+    30: ProductImageSpec("제주 광어회 500g", "sashimi,fish", 130),
+    31: ProductImageSpec("고등어 2마리", "mackerel,fish", 131),
+    32: ProductImageSpec("참치회 400g", "tuna,sashimi", 132),
+    33: ProductImageSpec("갈치 2마리", "cooked-fish", 2),
+    34: ProductImageSpec("통영 생굴 1kg", "oyster,seafood", 134),
+    35: ProductImageSpec("킹크랩 1마리 (1.5kg)", "king-crab,seafood", 135),
+    36: ProductImageSpec("새우 (대) 1kg", "shrimp,seafood", 136),
+    37: ProductImageSpec("전복 10마리", "abalone,seafood", 137),
+    38: ProductImageSpec("오징어 3마리", "squid,seafood", 138),
+    39: ProductImageSpec("유기농 블루베리 500g", "blueberry,fruit", 139),
+    40: ProductImageSpec("친환경 방울토마토 1kg", "cherry-tomato", 1),
+    41: ProductImageSpec("유기농 브로콜리 2개", "broccoli,vegetable", 141),
+    42: ProductImageSpec("흙당근 2kg", "carrot,soil,vegetable", 142),
+}
+
+IMAGE_BASE_URL = "https://loremflickr.com"
+
+
+def _image_url(spec: ProductImageSpec, size: int, variant: int = 0) -> str:
+    return f"{IMAGE_BASE_URL}/{size}/{size}/{spec.keywords}?lock={spec.lock + variant * 100}"
+
+
+def _build_images(product_id: int) -> tuple[str, str]:
+    spec = PRODUCT_IMAGE_SPECS[product_id]
+    thumbnail = _image_url(spec, 400)
+    gallery = [_image_url(spec, 600, idx) for idx in range(3)]
+    return thumbnail, json.dumps(gallery, ensure_ascii=False)
+
+
 # 상품별 카테고리/스토어 매핑(1-based product id)
 PRODUCT_CATEGORY_BY_ID = [
     5,
@@ -381,6 +448,12 @@ def seed_core_data(db) -> SeedState:
 
     products: list[Product] = []
     for i, name in enumerate(PRODUCT_NAMES, start=1):
+        image_spec = PRODUCT_IMAGE_SPECS[i]
+        if image_spec.name != name:
+            raise ValueError(
+                f"상품 이미지 매핑 불일치: id={i}, seed={name!r}, image_spec={image_spec.name!r}"
+            )
+        thumbnail, images = _build_images(i)
         category_id = PRODUCT_CATEGORY_BY_ID[i - 1]
         store_id = PRODUCT_STORE_BY_ID[i - 1]
         price = _product_price(i)
@@ -397,14 +470,8 @@ def seed_core_data(db) -> SeedState:
             rating=round(4.2 + (i % 7) * 0.1, 1),
             review_count=10 + (i % 90),
             sales_count=50 + (i * 9),
-            thumbnail=f"https://picsum.photos/seed/product{i}/400/400",
-            images=json.dumps(
-                [
-                    f"https://picsum.photos/seed/product{i}a/600/600",
-                    f"https://picsum.photos/seed/product{i}b/600/600",
-                    f"https://picsum.photos/seed/product{i}c/600/600",
-                ]
-            ),
+            thumbnail=thumbnail,
+            images=images,
             options=json.dumps(["기본"]),
             created_at=now - timedelta(days=42 - i),
         )

@@ -13,35 +13,39 @@ export default function ChatWidget() {
   const { user } = useUserStore();
   const userId = user?.shop_user_id ?? null;
   const wasOpenRef = useRef(false);
+  // 위젯이 열릴 때 초기화 의도를 보관 — activeSessionLoading이 true인 동안에도 유지
+  const shouldInitRef = useRef(false);
 
   // Fetch active session on mount/user change (회원만)
   const { data: activeSession, isLoading: activeSessionLoading } = useActiveSession(userId);
-  const { mutate: createSession, isPending: isCreating } = useCreateSession();
+  const { mutate: createSession } = useCreateSession();
 
-  // 플로팅 버튼이 처음 열릴 때만 chat view로 초기화
+  // Step 1: 위젯이 열리는 순간 초기화 의도를 표시
   useEffect(() => {
-    const justOpened = open && !wasOpenRef.current;
-
-    if (justOpened && userId && !activeSessionLoading) {
-      // open이 false → true로 변했을 때만 실행
-
-      if (activeSession) {
-        // 활성 세션 있으면 그걸 사용
-        setActiveSessionId(activeSession.id);
-        setView('chat');
-      } else if (activeSessionId === null) {
-        // 활성 세션 없으면 새로 생성
-        createSession(userId, {
-          onSuccess: (newSession) => {
-            // 세션 생성 완료 후 ID 설정 및 view 전환
-            setActiveSessionId(newSession.id);
-            setView('chat');
-          },
-        });
-      }
+    if (open && !wasOpenRef.current) {
+      shouldInitRef.current = true;
     }
-
     wasOpenRef.current = open;
+  }, [open]);
+
+  // Step 2: 초기화 의도가 있고 로딩이 완료되면 실제로 chat view로 전환
+  // activeSessionLoading이 true → false로 바뀔 때도 트리거되므로 race condition 없음
+  useEffect(() => {
+    if (!shouldInitRef.current || !open || activeSessionLoading || !userId) return;
+
+    shouldInitRef.current = false;
+
+    if (activeSession) {
+      setActiveSessionId(activeSession.id);
+      setView('chat');
+    } else if (activeSessionId === null) {
+      createSession(userId, {
+        onSuccess: (newSession) => {
+          setActiveSessionId(newSession.id);
+          setView('chat');
+        },
+      });
+    }
   }, [open, userId, activeSessionLoading, activeSession, activeSessionId, createSession]);
 
   // Reset to list view when widget is closed

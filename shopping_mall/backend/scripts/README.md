@@ -7,12 +7,16 @@
 | 파일 | 역할 |
 |------|------|
 | `seed_and_verify.py` | ChromaDB 시딩(`ai/seed_rag.py`) 실행 후 전체 컬렉션 검색 검증까지 한번에 수행 |
+| `update_product_images.py` | 상품 더미 이미지(`picsum`)를 품목명 기반 외부 이미지 URL로 교체 |
 
 ## 실행
 
 ```bash
 # RAG 시딩 + 검증 (.env의 EMBED_PROVIDER 설정 사용)
 uv run python scripts/seed_and_verify.py
+
+# 상품 이미지 URL 보정
+uv run python scripts/update_product_images.py
 ```
 
 ## seed_and_verify.py 단계

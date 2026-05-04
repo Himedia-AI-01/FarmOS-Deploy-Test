@@ -52,14 +52,7 @@ class ChatLogResponse(BaseModel):
     question: str
     answer: str
     escalated: bool
-    rating: Optional[int] = None
     created_at: Optional[datetime] = None
-
-
-class ChatRating(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
-    rating: int = Field(..., ge=1, le=5)
 
 
 # ── 도구 분석 스키마 ─────────────────────────────────────────────────────────

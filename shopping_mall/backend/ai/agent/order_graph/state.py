@@ -4,7 +4,7 @@ from typing import TypedDict
 
 class OrderState(TypedDict):
     # ── 컨텍스트 (최초 ainvoke 시 주입) ────────────────────────────────────
-    action: str           # "cancel" | "exchange"
+    action: str           # "cancel" | "exchange" | "change"
     user_id: int
     session_id: int
     user_message: str     # interrupt resume 시 사용자 입력값
@@ -15,6 +15,8 @@ class OrderState(TypedDict):
     selected_items: list        # [{"item_id": int, "name": str, "qty": int}]
     reason: str | None          # 교환/취소 사유
     refund_method: str | None   # 취소 시 환불 방법
+    change_type: str | None     # 주문 변경 유형
+    change_detail: str | None   # 주문 변경 요청 상세
     stock_note: str             # 교환 품목 재고 부족 안내 (check_stock → show_summary 전달용)
 
     # ── 흐름 제어 ─────────────────────────────────────────────────────────

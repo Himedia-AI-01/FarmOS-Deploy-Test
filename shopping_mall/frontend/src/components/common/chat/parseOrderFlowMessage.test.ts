@@ -130,6 +130,22 @@ describe('order-select', () => {
     expect(result.items[1]).toMatchObject({ num: '2', orderId: '#201' });
   });
 
+  it('select_order_change 렌더링에서 주문 변경 목록을 파싱한다', () => {
+    // ANCHOR: select_order_change — "번호(1, 2 …)를 입력해 주세요"
+    const orderBlock = makeOrderBlock(1, 210, '나주배 선물세트', '2025-02-10');
+    const text =
+      '변경 가능한 주문 목록입니다.\n\n' +
+      `${orderBlock}\n\n` +
+      '변경하실 주문의 번호(1, 2 …)를 입력해 주세요.\n' +
+      "진행을 중단하려면 '그만'이라고 입력하세요.";
+
+    const result = parseOrderFlowMessage(text);
+    expect(result?.type).toBe('order-select');
+    if (result?.type !== 'order-select') return;
+
+    expect(result.items[0]).toMatchObject({ num: '1', orderId: '#210' });
+  });
+
   it('invalid_order_selection 재선택 프롬프트도 파싱한다', () => {
     // ANCHOR: invalid_order_selection — "번호(1, 2 …)를 입력해 주세요"
     const orderBlock = makeOrderBlock(1, 300, '복숭아 1kg', '2025-03-01');
@@ -262,12 +278,49 @@ describe('simple-options', () => {
     expect(result.items[1]).toEqual({ num: '2', label: '적립금으로 환불', isOther: false });
   });
 
+  it('change_type 렌더링에서 변경 유형 옵션을 파싱한다', () => {
+    // ANCHOR: change_type — "번호를 입력해 주세요"
+    const text =
+      '어떤 내용을 변경하시겠어요?\n\n' +
+      '1. 배송지 변경\n' +
+      '2. 연락처 변경\n' +
+      '3. 배송 요청사항 변경\n' +
+      '4. 상품 수량 변경\n' +
+      '5. 기타 변경\n\n' +
+      '번호를 입력해 주세요.';
+
+    const result = parseOrderFlowMessage(text);
+    expect(result?.type).toBe('simple-options');
+    if (result?.type !== 'simple-options') return;
+
+    expect(result.items).toHaveLength(5);
+    expect(result.items[0]).toMatchObject({ num: '1', label: '배송지 변경' });
+  });
+
   it('기타로 시작하지 않는 항목은 isOther: false 다', () => {
     const text = '1. 상품 불량\n2. 오배송\n\n번호 또는 사유를 입력해 주세요.';
     const result = parseOrderFlowMessage(text);
     expect(result?.type).toBe('simple-options');
     if (result?.type !== 'simple-options') return;
     expect(result.items.every((i) => !i.isOther)).toBe(true);
+  });
+});
+
+describe('editable-input', () => {
+  it('change_detail 렌더링에서 현재 등록값을 기본값으로 파싱한다', () => {
+    const text =
+      '배송지 변경에 필요한 내용을 확인하고 수정해 주세요.\n\n' +
+      '현재 등록된 내용:\n' +
+      '서울시 강남구 기존 주소\n\n' +
+      '새 배송지의 받는 분, 연락처, 주소를 입력해 주세요.\n\n' +
+      '수정할 내용을 확인한 뒤 전송해 주세요.';
+
+    const result = parseOrderFlowMessage(text);
+
+    expect(result?.type).toBe('editable-input');
+    if (result?.type !== 'editable-input') return;
+    expect(result.input.defaultValue).toBe('서울시 강남구 기존 주소');
+    expect(result.input.guide).toBe('새 배송지의 받는 분, 연락처, 주소를 입력해 주세요.');
   });
 });
 

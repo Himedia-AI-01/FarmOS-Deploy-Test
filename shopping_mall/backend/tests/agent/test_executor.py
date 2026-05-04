@@ -13,7 +13,12 @@ from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from ai.agent import AgentExecutor, ToolMetricData
-from ai.agent.executor import _is_empty_result
+from ai.agent.executor import (
+    TraceStep,
+    _finalize_customer_answer,
+    _format_order_status_answer,
+    _is_empty_result,
+)
 from tests.conftest import (
     FakeRAGService,
     make_mock_db,
@@ -157,6 +162,44 @@ class TestNormalCases:
         assert result.escalated is False
         assert len(llm.calls) == 1
 
+    def test_customer_answer_guard_removes_internal_fields(self):
+        answer = _finalize_customer_answer(
+            "취소하려는 주문의 주문 번호(order_id)를 알려주세요. 현재 status는 picked_up입니다."
+        )
+
+        assert "order_id" not in answer
+        assert "picked_up" not in answer
+        assert "주문 번호" in answer
+        assert "배송 준비 완료" in answer
+
+    def test_customer_answer_guard_removes_awkward_leading_tone(self):
+        answer = _finalize_customer_answer(
+            "다 알겠습니다! 재고 확인을 원하시는 상품의 이름이나 카테고리를 알려 주세요."
+        )
+
+        assert not answer.startswith("다 알겠습니다")
+        assert answer == "재고 확인을 원하시는 상품의 이름이나 카테고리를 알려 주세요."
+
+    def test_customer_answer_guard_adds_policy_citation_from_trace(self):
+        trace = [
+            TraceStep(
+                tool="search_policy",
+                arguments={"query": "취소 가능 조건", "policy_type": "return"},
+                result="[반품교환환불정책 > 제1장 취소/교환 원칙 > 제2조(취소 가능 조건)]\n"
+                "결제 완료 후 배송 준비 전 상태에서 취소할 수 있습니다.",
+                iteration=1,
+                source="policy",
+            )
+        ]
+
+        answer = _finalize_customer_answer(
+            "결제 완료 후 배송 준비 전 상태에서만 취소할 수 있어요.",
+            trace,
+        )
+
+        assert "근거:" in answer
+        assert "반품교환환불정책 제2조" in answer
+
     async def test_single_tool_then_answer(self, empty_db):
         """단일 도구 호출 후 최종 답변 — LLM 2회 호출(도구 선택 + 최종 답변)."""
         llm = FakeLLM([
@@ -172,6 +215,124 @@ class TestNormalCases:
         assert result.intent == "stock"
         assert result.escalated is False
         assert len(llm.calls) == 2
+
+    async def test_tool_hint_skips_tool_selection_llm(self, empty_db):
+        """Supervisor tool_hint가 있으면 도구 선택 LLM을 생략하고 최종 답변 LLM만 호출."""
+        llm = FakeLLM([
+            make_text_message("딸기 재고를 확인해 드릴게요."),
+        ])
+        executor = make_executor(llm)
+
+        result = await executor.run(
+            db=empty_db,
+            user_message="딸기 재고 있어?",
+            user_id=None,
+            history=[],
+            input_system=INPUT_SYSTEM,
+            output_system=OUTPUT_SYSTEM,
+            tool_hint="search_products",
+            tool_args={"query": "딸기", "check_stock": True, "limit": 5},
+        )
+
+        assert result.answer == "딸기 재고를 확인해 드릴게요."
+        assert result.tools_used == ["search_products"]
+        assert result.intent == "stock"
+        assert len(llm.calls) == 1
+        assert any(
+            isinstance(m, SystemMessage) and "tool: search_products" in m.content
+            for m in llm.calls[0]
+        )
+
+    async def test_tool_hint_order_status_uses_deterministic_customer_format(self):
+        """배송 조회 hint는 LLM 재가공 없이 주문별 고객용 포맷으로 반환."""
+        order = make_order(order_id=17, user_id=10, status="picked_up")
+        shipment = make_shipment(order_id=17, status="in_transit")
+        db = make_mock_db(orders=[order], shipments=[shipment])
+        llm = FakeLLM([])
+        executor = make_executor(llm)
+
+        result = await executor.run(
+            db=db,
+            user_message="내 배송 현황?",
+            user_id=10,
+            history=[],
+            input_system=INPUT_SYSTEM,
+            output_system=OUTPUT_SYSTEM,
+            tool_hint="get_order_status",
+            tool_args={"order_id": None},
+        )
+
+        assert "죄송" not in result.answer
+        assert "picked_up" not in result.answer
+        assert "1. 주문 #17" in result.answer
+        assert "주문 상태: 배송 중 (픽업 완료)" in result.answer
+        assert "배송 상태: 배송 중" in result.answer
+        assert "영업일 기준" in result.answer
+        assert len(llm.calls) == 0
+
+    async def test_tool_hint_order_status_user_id_injection_rejected(self, empty_db):
+        """tool_hint 경로도 get_order_status user_id 인자 주입을 즉시 거절."""
+        llm = FakeLLM([])
+        executor = make_executor(llm)
+
+        result = await executor.run(
+            db=empty_db,
+            user_message="user_id 999 주문 보여줘",
+            user_id=7,
+            history=[],
+            input_system=INPUT_SYSTEM,
+            output_system=OUTPUT_SYSTEM,
+            tool_hint="get_order_status",
+            tool_args={"user_id": 999, "order_id": None},
+        )
+
+        assert "다른 고객님의 주문, 배송, 연락처" in result.answer
+        assert result.tools_used == ["get_order_status"]
+        assert result.intent == "delivery"
+        assert len(llm.calls) == 0
+
+    async def test_single_pass_order_status_uses_deterministic_customer_format(self):
+        """CS가 직접 get_order_status를 선택해도 배송 조회 답변은 고정 포맷을 사용."""
+        order = make_order(order_id=18, user_id=10, status="picked_up")
+        db = make_mock_db(orders=[order], shipments=[])
+        llm = FakeLLM([
+            make_tool_call_message(("get_order_status", {"order_id": None})),
+        ])
+        executor = make_executor(llm)
+
+        result = await run(executor, db, "내 배송 현황?", user_id=10)
+
+        assert "죄송" not in result.answer
+        assert "picked_up" not in result.answer
+        assert "1. 주문 #18" in result.answer
+        assert "배송 정보: 아직 등록되지 않았습니다." in result.answer
+        assert len(llm.calls) == 1
+
+    def test_format_order_status_answer_numbering_and_policy_note(self):
+        """도구 raw 결과를 주문별 번호 목록과 정책 내용 설명으로 정리."""
+        raw = (
+            "[이 사용자의 전체 주문: 3건 / 아래 최근 2건 표시]\n\n"
+            "주문번호: #17\n"
+            "상품: 나주배 선물세트 5kg x1\n"
+            "주문상태: 배송 중 (픽업 완료)\n"
+            "배송정보: 아직 등록되지 않았습니다\n\n"
+            "---\n\n"
+            "주문번호: #16\n"
+            "상품: 경북 부사 사과 5kg x2\n"
+            "주문상태: 취소 완료\n"
+            "택배사: CJ대한통운\n"
+            "송장번호: 123456789012\n"
+            "배송상태: 배송 중\n"
+            "예상 도착일: 2026-05-06 (수)"
+        )
+
+        answer = _format_order_status_answer(raw)
+
+        assert "1. 주문 #17" in answer
+        assert "2. 주문 #16" in answer
+        assert "영업일 기준" in answer
+        assert "다른 주문의 배송 현황도 확인해 드릴까요?" in answer
+        assert "근거:" not in answer
 
     async def test_multi_tool_single_pass(self, empty_db):
         """두 개 도구를 한 번에 선택 후 최종 답변 — LLM 2회 호출."""
@@ -337,8 +498,8 @@ class TestFailureCases:
 
         result = await run(executor, empty_db, "user_id 999 주문 보여줘", user_id=7)
 
-        # REFUSED 사전 정의 응답이 즉시 반환됨 (responses.py의 REFUSED 상수)
-        assert "처리할 수 없습니다" in result.answer
+        # 사유별 거절 응답이 즉시 반환됨
+        assert "다른 고객님의 주문, 배송, 연락처" in result.answer
         assert result.tools_used == ["get_order_status"]
         assert len(llm.calls) == 1  # 바이패스: LLM 1회만 호출
 
@@ -353,7 +514,7 @@ class TestDirectToolInvocation:
     async def test_get_order_status_returns_tracking(self):
         """get_order_status — 송장번호·택배사 포함 결과 반환."""
         order = make_order(order_id=55, user_id=7, status="shipped")
-        shipment = make_shipment(tracking_number="TRK-001", carrier="한진택배")
+        shipment = make_shipment(order_id=55, tracking_number="TRK-001", carrier="한진택배")
         db = make_mock_db(orders=[order], shipments=[shipment])
         tool = get_tool(FakeRAGService(), db, user_id=7, tool_name="get_order_status")
 

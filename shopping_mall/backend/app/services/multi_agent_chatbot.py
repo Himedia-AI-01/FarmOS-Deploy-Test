@@ -1,6 +1,5 @@
 """멀티 에이전트 챗봇 서비스 — AgentChatbotService와 동일한 인터페이스."""
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
@@ -50,6 +49,7 @@ class MultiAgentChatbotService:
         context = RequestContext.build(user_id)
 
         # Supervisor 에이전트 실행
+        agent_error = False
         try:
             result = await self.supervisor.run(
                 db=db,
@@ -63,6 +63,13 @@ class MultiAgentChatbotService:
             )
         except Exception as e:
             logger.error("에이전트 실행 오류: %s", e, exc_info=True)
+            agent_error = True
+            # 에이전트가 DB 툴을 사용하다 예외가 발생하면 세션이 오염 상태일 수 있음.
+            # ChatLog 저장 전에 반드시 롤백하여 세션을 깨끗한 상태로 복구한다.
+            try:
+                db.rollback()
+            except Exception:
+                pass
             from ai.agent.executor import AgentResult
             result = AgentResult(
                 answer=SERVICE_TEMPORARY_ERROR,
@@ -71,42 +78,53 @@ class MultiAgentChatbotService:
             )
 
         # ChatLog 저장 + 세션 메타데이터 갱신 (단일 트랜잭션)
-        from app.models.chat_log import ChatLog
-        log = ChatLog(
-            user_id=user_id,
-            session_id=session_id,
-            intent=result.intent,
-            question=question,
-            answer=result.answer,
-            escalated=result.escalated,
-        )
-        db.add(log)
-
-        if session_id:
-            from app.models.chat_session import ChatSession
-            session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
-            if session:
-                if not session.title:
-                    session.title = question[:50]
-                session.updated_at = datetime.now(timezone.utc)
-
-        db.commit()
-
-        # FAQ 인용 기록 저장 (cited_faq_ids가 있을 때만, 별도 트랜잭션)
+        # 에이전트 오류 시에도 대화 기록은 저장하되, 실패해도 응답은 반환한다.
+        log_id: int | None = None
         cited_faq_ids = getattr(result, "cited_faq_ids", [])
-        if cited_faq_ids:
-            self._save_faq_citations(db, cited_faq_ids, log.id)
+        try:
+            from app.models.chat_log import ChatLog
+            log = ChatLog(
+                user_id=user_id,
+                session_id=session_id,
+                intent=result.intent,
+                question=question,
+                answer=result.answer,
+                escalated=result.escalated,
+            )
+            db.add(log)
 
-        # 메트릭 저장 (ChatLog commit 이후 별도 트랜잭션)
-        if result.metrics:
-            self._save_metrics(db, result.metrics, log.id, session_id)
+            if session_id:
+                from app.models.chat_session import ChatSession
+                session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+                if session:
+                    if not session.title:
+                        session.title = question[:50]
+                    # updated_at은 모델의 onupdate=func.now()가 자동 갱신
+
+            db.commit()
+            log_id = log.id
+
+            # FAQ 인용 기록 저장 (cited_faq_ids가 있을 때만, 별도 트랜잭션)
+            if cited_faq_ids:
+                self._save_faq_citations(db, cited_faq_ids, log_id)
+
+            # 메트릭 저장 (ChatLog commit 이후 별도 트랜잭션)
+            if result.metrics:
+                self._save_metrics(db, result.metrics, log_id, session_id)
+
+        except Exception as e:
+            logger.error("ChatLog 저장 오류 (응답은 정상 반환): %s", e, exc_info=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
         return {
             "answer": result.answer,
             "intent": result.intent,
             "escalated": result.escalated,
             "trace": result.trace,
-            "chat_log_id": log.id,
+            "chat_log_id": log_id,
             "cited_faq_ids": cited_faq_ids,
         }
 

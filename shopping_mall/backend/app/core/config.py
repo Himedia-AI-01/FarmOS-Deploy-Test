@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     litellm_model: str = "openai/gpt-4o-mini"
     llm_provider: str = "openrouter"  # 참고용 (현재 라우팅에 직접 사용되지 않음)
 
+    # Reasoning-only models (gpt-5/o-series) can opt into a reasoning depth.
+    # Leave empty by default because the default chat model (gpt-4o-mini) does
+    # not accept reasoning_effort on every OpenAI-compatible provider.
+    llm_reasoning_effort: str = ""
+
     # ── Fallback LLM (Anthropic Claude) ─────────────────────────────────────
     anthropic_api_key: str = ""
     claude_fallback_model: str = "claude-haiku-4-5"
@@ -91,7 +96,11 @@ class Settings(BaseSettings):
             )
         return re.sub(r"^(postgres(?:ql)?)\+\w+://", r"\1://", url)
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = {
+        # __file__ 기준 절대 경로로 고정 — uvicorn CWD가 달라져도 .env를 항상 찾음
+        "env_file": str(BACKEND_ROOT / ".env"),
+        "extra": "ignore",
+    }
 
 
 settings = Settings()

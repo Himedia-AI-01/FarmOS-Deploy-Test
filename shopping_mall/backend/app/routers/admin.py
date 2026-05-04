@@ -1,12 +1,13 @@
 """관리자 전용 라우터 — 티켓·챗봇 로그·배송 운영 데이터."""
+import json
 import logging
-from typing import List, Optional
+from typing import List, Literal, Optional
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
@@ -24,6 +25,12 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 # ── 스키마 ──────────────────────────────────────────────────────────────────
 
 
+class TicketFlag(BaseModel):
+    code: str
+    label: str
+    severity: Literal["info", "warning", "danger"]
+
+
 class TicketResponse(BaseModel):
     id: int
     user_id: int
@@ -37,6 +44,7 @@ class TicketResponse(BaseModel):
     created_at: datetime
     user_name: Optional[str] = None
     order_total: Optional[int] = None
+    flags: list[TicketFlag] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -53,7 +61,6 @@ class AdminChatLogResponse(BaseModel):
     question: str
     answer: str
     escalated: bool
-    rating: Optional[int] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -87,6 +94,36 @@ _TICKET_ALLOWED_TRANSITIONS: dict[str, list[str]] = {
     "completed":  [],
     "cancelled":  [],
 }
+_VALID_TICKET_FLAG_SEVERITIES = {"info", "warning", "danger"}
+
+
+def _parse_ticket_flags(raw: str | None) -> list[TicketFlag]:
+    """Persisted JSON flags → validated API flags."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("[admin] ticket flags JSON 파싱 실패: %r", raw)
+        return []
+    if not isinstance(parsed, list):
+        return []
+
+    flags: list[TicketFlag] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("code")
+        label = item.get("label")
+        severity = item.get("severity")
+        if (
+            isinstance(code, str)
+            and isinstance(label, str)
+            and isinstance(severity, str)
+            and severity in _VALID_TICKET_FLAG_SEVERITIES
+        ):
+            flags.append(TicketFlag(code=code, label=label, severity=severity))
+    return flags
 
 
 def _enrich_ticket(t: ShopTicket, db: Session) -> TicketResponse:
@@ -106,6 +143,7 @@ def _enrich_ticket(t: ShopTicket, db: Session) -> TicketResponse:
         created_at=t.created_at,
         user_name=user.name if user else None,
         order_total=order.total_price if order else None,
+        flags=_parse_ticket_flags(getattr(t, "flags", None)),
     )
 
 
@@ -115,13 +153,13 @@ def _enrich_ticket(t: ShopTicket, db: Session) -> TicketResponse:
 @router.get("/tickets", response_model=List[TicketResponse])
 def list_tickets(
     status: Optional[str] = Query(None, description="received | processing | completed | cancelled"),
-    action_type: Optional[str] = Query(None, description="cancel | exchange"),
+    action_type: Optional[str] = Query(None, description="cancel | exchange | change"),
     user_id: Optional[int] = Query(None, description="특정 사용자의 티켓만 조회"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """모든 교환·취소 티켓 목록을 반환합니다."""
+    """모든 교환·취소·주문 변경 티켓 목록을 반환합니다."""
     q = db.query(ShopTicket)
     if status:
         q = q.filter(ShopTicket.status == status)
@@ -157,6 +195,7 @@ def list_tickets(
             created_at=t.created_at,
             user_name=users_map[t.user_id].name if t.user_id in users_map else None,
             order_total=orders_map[t.order_id].total_price if t.order_id in orders_map else None,
+            flags=_parse_ticket_flags(getattr(t, "flags", None)),
         )
         for t in tickets
     ]
@@ -174,6 +213,7 @@ def get_ticket_stats(db: Session = Depends(get_db)):
         "total": 0,
         "exchange": 0,
         "cancel": 0,
+        "change": 0,
     }
     for status, action_type in rows:
         stats["total"] += 1

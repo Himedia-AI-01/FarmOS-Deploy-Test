@@ -2,13 +2,19 @@ import { useQuery } from '@tanstack/react-query';
 import api from '@/lib/api';
 import type { ChatLog, ChatSession } from '@/admin/types/chatlog';
 
-export function useChatLogs(filters: { intent?: string; escalated?: boolean } = {}) {
-  const params: Record<string, string> = {};
+const MAX_LIMIT = 1000;
+
+export function useChatLogs(
+  filters: { intent?: string; escalated?: boolean } = {},
+  limit = 500,
+) {
+  const normalizedLimit = Math.max(1, Math.min(limit, MAX_LIMIT));
+  const params: Record<string, string> = { limit: String(normalizedLimit) };
   if (filters.intent) params.intent = filters.intent;
   if (filters.escalated !== undefined) params.escalated = String(filters.escalated);
 
   return useQuery<ChatLog[]>({
-    queryKey: ['admin-chat-logs', filters],
+    queryKey: ['admin-chat-logs', filters, normalizedLimit],
     queryFn: async () => {
       const { data } = await api.get('/api/admin/chatbot/logs', { params });
       return data;

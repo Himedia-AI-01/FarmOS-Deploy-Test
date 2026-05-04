@@ -7,6 +7,7 @@ import {
   TICKET_STATUS_COLOR,
   TICKET_ACTION_LABEL,
   TICKET_ACTION_COLOR,
+  TICKET_FLAG_COLOR,
 } from '@/admin/types/ticket';
 import { parseTicketItems } from '@/admin/types/ticket';
 import type { Ticket, TicketStatus, TicketActionType } from '@/admin/types/ticket';
@@ -21,6 +22,11 @@ const CARRIERS = ['CJ대한통운', '한진', '로젠', '우체국택배', '롯�
 type StatusFilter = TicketStatus | 'all';
 type CategoryFilter = 'all' | 'product' | 'delivery';
 type ActionFilter = TicketActionType | 'all';
+type TicketFlagView = {
+  code: string;
+  label: string;
+  severity: 'info' | 'warning' | 'danger';
+};
 
 const STATUS_TABS: { value: StatusFilter; label: string }[] = [
   { value: 'all', label: '전체' },
@@ -42,19 +48,21 @@ const CATEGORY_SUB_ACTIONS: Record<CategoryFilter, { value: ActionFilter; label:
     { value: 'all',      label: '전체' },
     { value: 'exchange', label: '교환' },
     { value: 'cancel',   label: '취소' },
+    { value: 'change',   label: '변경' },
   ],
   product: [
     { value: 'all',      label: '전체' },
     { value: 'exchange', label: '교환' },
     { value: 'cancel',   label: '취소' },
+    { value: 'change',   label: '변경' },
   ],
   delivery: [],
 };
 
 /** 카테고리에 해당하는 action_type 목록 (프론트 필터링용) */
 const CATEGORY_ACTION_TYPES: Record<CategoryFilter, TicketActionType[]> = {
-  all:      ['cancel', 'exchange'],
-  product:  ['cancel', 'exchange'],
+  all:      ['cancel', 'exchange', 'change'],
+  product:  ['cancel', 'exchange', 'change'],
   delivery: [],
 };
 
@@ -237,6 +245,7 @@ function TicketCard({
   onClick: () => void;
 }) {
   const maskedName = maskName(ticket.user_name, ticket.user_id);
+  const flags: TicketFlagView[] = ticket.flags ?? [];
 
   return (
     <button
@@ -260,13 +269,21 @@ function TicketCard({
       </div>
 
       {/* Badge row */}
-      <div className="flex gap-2 mb-2.5">
+      <div className="flex flex-wrap gap-2 mb-2.5">
         <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${TICKET_ACTION_COLOR[ticket.action_type]}`}>
           {TICKET_ACTION_LABEL[ticket.action_type]}
         </span>
         <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${TICKET_STATUS_COLOR[ticket.status]}`}>
           {TICKET_STATUS_LABEL[ticket.status]}
         </span>
+        {flags.map((flag) => (
+          <span
+            key={flag.code}
+            className={`px-2 py-0.5 rounded text-[10px] font-bold ${TICKET_FLAG_COLOR[flag.severity]}`}
+          >
+            {flag.label}
+          </span>
+        ))}
       </div>
 
       {/* Preview */}
@@ -327,8 +344,6 @@ function StatusTimeline({ status }: { status: TicketStatus }) {
 
           const isDone = !isCancelled && currentIndex > stepIndex;
           const isActive = !isCancelled && status === step.status;
-          const isFuture = isCancelled || currentIndex < stepIndex;
-
           let circleClass: string;
           let iconName: string;
 
@@ -394,6 +409,7 @@ function TicketDetail({ ticket }: { ticket: Ticket }) {
   const { mutate: updateStatus, isPending } = useUpdateTicketStatus();
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
   const nextStatuses = NEXT_STATUSES[ticket.status];
+  const flags: TicketFlagView[] = ticket.flags ?? [];
 
   const parsedItems = parseTicketItems(ticket);
 
@@ -431,13 +447,21 @@ function TicketDetail({ ticket }: { ticket: Ticket }) {
               {maskedName}
               <span className="text-base font-normal text-stone-400 ml-2">(ID: {ticket.user_id})</span>
             </h3>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <span className={`px-3 py-1 rounded-full text-[11px] font-bold tracking-wider ${TICKET_ACTION_COLOR[ticket.action_type]}`}>
                 {TICKET_ACTION_LABEL[ticket.action_type]}
               </span>
               <span className={`px-3 py-1 rounded-full text-[11px] font-bold tracking-wider ${TICKET_STATUS_COLOR[ticket.status]}`}>
                 {TICKET_STATUS_LABEL[ticket.status]}
               </span>
+              {flags.map((flag) => (
+                <span
+                  key={flag.code}
+                  className={`px-3 py-1 rounded-full text-[11px] font-bold tracking-wider ${TICKET_FLAG_COLOR[flag.severity]}`}
+                >
+                  {flag.label}
+                </span>
+              ))}
             </div>
           </div>
 
@@ -515,6 +539,25 @@ function TicketDetail({ ticket }: { ticket: Ticket }) {
       {/* ── Timeline ── */}
       <StatusTimeline status={ticket.status} />
 
+      {flags.length > 0 && (
+        <div className="bg-surface-container-lowest rounded-xl p-6 border border-amber-200">
+          <h4 className="text-sm font-bold text-amber-800 mb-4 flex items-center gap-2">
+            <span className="material-symbols-outlined text-lg" aria-hidden="true">priority_high</span>
+            운영 확인 항목
+          </h4>
+          <div className="flex flex-wrap gap-2">
+            {flags.map((flag) => (
+              <span
+                key={flag.code}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold ${TICKET_FLAG_COLOR[flag.severity]}`}
+              >
+                {flag.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ── Info grid ── */}
       <div className="grid grid-cols-2 gap-6">
         {/* Order info */}
@@ -553,7 +596,11 @@ function TicketDetail({ ticket }: { ticket: Ticket }) {
         <div className="bg-surface-container-lowest rounded-xl p-6 border border-stone-100/50">
           <h4 className="text-sm font-bold text-emerald-900 mb-4 flex items-center gap-2">
             <span className="material-symbols-outlined text-lg" aria-hidden="true">description</span>
-            {ticket.action_type === 'exchange' ? '교환 사유' : '취소 사유'}
+            {ticket.action_type === 'exchange'
+              ? '교환 사유'
+              : ticket.action_type === 'change'
+                ? '변경 유형'
+                : '취소 사유'}
           </h4>
           <div className="bg-stone-50/80 rounded-lg p-4 border border-stone-100">
             <p className="text-xs text-stone-700 leading-relaxed italic">
@@ -738,7 +785,7 @@ export default function TicketsPage() {
                   ? (stats?.total ?? 0)
                   : cat.value === 'delivery'
                     ? 0
-                    : (stats?.exchange ?? 0) + (stats?.cancel ?? 0);
+                    : (stats?.exchange ?? 0) + (stats?.cancel ?? 0) + (stats?.change ?? 0);
                 return (
                   <button
                     key={cat.value}
@@ -779,10 +826,14 @@ export default function TicketsPage() {
                     baseClass = isActive
                       ? 'bg-violet-600 text-white border-violet-600 shadow-sm'
                       : 'bg-white text-violet-700 border-violet-400 hover:border-violet-600 hover:bg-violet-50';
-                  } else {
+                  } else if (val === 'cancel') {
                     baseClass = isActive
                       ? 'bg-rose-500 text-white border-rose-500 shadow-sm'
                       : 'bg-white text-rose-600 border-rose-400 hover:border-rose-600 hover:bg-rose-50';
+                  } else {
+                    baseClass = isActive
+                      ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
+                      : 'bg-white text-amber-700 border-amber-400 hover:border-amber-600 hover:bg-amber-50';
                   }
                   return (
                     <button

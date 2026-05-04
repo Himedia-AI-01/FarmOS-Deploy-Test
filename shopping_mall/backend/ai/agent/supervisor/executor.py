@@ -3,6 +3,7 @@ import asyncio
 import logging
 import re
 import time
+from typing import Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,18 +17,26 @@ from ai.agent.executor import (
     ToolMetricData,
     _history_to_lc,
     _log_trace,
+    _finalize_customer_answer,
     _parse_answer,
 )
 from ai.agent.responses import (
     LOGIN_REQUIRED,
     MAX_ITERATIONS_EXCEEDED,
     LLM_GENERATION_FAILED,
+    STOCK_QUERY_NEEDS_TARGET,
+    refusal_response,
 )
 
 logger = logging.getLogger(__name__)
 
-# 취소/교환 의도 감지 키워드 (_detect_order_action에서 사용)
+# 취소/교환/변경 의도 감지 키워드 (_detect_order_action에서 사용)
 _CANCEL_KEYWORDS: frozenset[str] = frozenset({"취소", "cancel", "환불"})
+_CHANGE_KEYWORDS: frozenset[str] = frozenset({
+    "변경", "수정", "바꾸", "바꿔", "change",
+    "배송지", "주소", "연락처", "전화번호", "요청사항",
+    "수량 변경", "수량수정",
+})
 _EXCHANGE_KEYWORDS: frozenset[str] = frozenset({
     "교환", "exchange", "반품", "교체",
     "벌레", "이물질", "불량", "상함", "파손", "하자", "오배송",
@@ -43,10 +52,27 @@ _ORDER_FASTPATH_PATTERNS: frozenset[str] = frozenset({
     "교환해줘", "교환해주세요", "교환해",
     "반품해줘", "반품해주세요", "반품해",
     "환불해줘", "환불해주세요", "환불해",
+    "변경해줘", "변경해주세요", "변경해",
+    "수정해줘", "수정해주세요", "수정해",
+    "바꿔줘", "바꿔주세요",
     # 신청/접수 명사형
     "취소 신청", "취소신청",
     "교환 신청", "교환신청",
     "반품 신청", "반품신청",
+    "변경 신청", "변경신청",
+})
+
+_ORDER_SHORT_ACTION_PHRASES: frozenset[str] = frozenset({
+    "주문 취소",
+    "주문취소",
+    "주문 교환",
+    "주문교환",
+    "주문 반품",
+    "주문반품",
+    "주문 환불",
+    "주문환불",
+    "주문 변경",
+    "주문변경",
 })
 
 # CS 에이전트가 교환/반품 선택지를 제시한 직후 사용자 응답을 OrderGraph로 라우팅
@@ -64,6 +90,88 @@ _CS_HANDOFF_SELECTIONS: frozenset[str] = frozenset({
 
 _SUPERVISOR_TOOL_TO_INTENT: dict[str, str] = {"call_cs_agent": "other"}
 
+_VAGUE_STOCK_MESSAGES: frozenset[str] = frozenset({
+    "재고 확인",
+    "재고 확인해줘",
+    "재고 확인해주세요",
+    "재고 확인해 주세요",
+    "재고 알려줘",
+    "재고 알려주세요",
+    "재고 있나요",
+    "재고 있어요",
+})
+_VAGUE_STOCK_COMPACT_MESSAGES: frozenset[str] = frozenset(
+    re.sub(r"\s+", "", msg) for msg in _VAGUE_STOCK_MESSAGES
+)
+
+_OTHER_USER_INFO_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:다른|타인|남의|타고객|타\s*고객|제\s*3자).{0,20}(?:주문|배송|송장|주소|연락처|전화번호|휴대폰|이메일|개인정보|정보|구매\s*내역)"),
+    re.compile(r"(?:홍길동|김철수|이영희|박영희|아무개)\s*(?:님|씨)?\s*.{0,20}(?:주문|배송|송장|주소|연락처|전화번호|휴대폰|이메일|개인정보|정보)"),
+    re.compile(r"(?:회원|고객|사용자|유저)\s*(?:id|아이디|번호)?\s*#?\d+.{0,20}(?:주문|배송|송장|주소|연락처|전화번호|휴대폰|이메일|개인정보|정보|조회)"),
+    re.compile(r"(?:user_id|shop_user_id|customer_id)\s*[:=#]?\s*\d+"),
+)
+
+_INTERNAL_INFO_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:오늘|당일|금일|어제|일간|주간|월간|이번\s*달|지난\s*달|전체|총)?\s*(?:매출|매상|영업\s*이익|순이익|수익|마진|정산|결제\s*금액)"),
+    re.compile(r"(?:매출|매상|수익|정산).*(?:알려|조회|보여|확인|얼마|뭐|몇)"),
+    re.compile(r"(?:전체|모든|전\s*고객|고객|회원|관리자|운영자|운영팀).{0,20}(?:주문|회원|고객).{0,20}(?:목록|리스트|명단|데이터|db|엑셀|다운로드)"),
+    re.compile(r"(?:주문|회원|고객).{0,20}(?:전체|전부|모두|고객별|회원별|데이터|db|엑셀|다운로드)"),
+    re.compile(r"(?:관리자|어드민|운영자|운영팀).*(?:대시보드|통계|로그|티켓|인사이트|데이터)"),
+    re.compile(r"(?:챗봇|상담).*(?:로그|대화\s*내역).*(?:전체|보여|조회|다운로드)"),
+    re.compile(r"(?:db|데이터베이스|sql|쿼리|시스템\s*프롬프트|api\s*key|apikey|토큰|비밀번호|패스워드)"),
+)
+
+_JAILBREAK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:이전|위의|앞의)\s*(?:지시|규칙|명령|프롬프트).{0,20}(?:무시|잊어|삭제|따르지)"),
+    re.compile(r"(?:시스템|개발자|관리자)\s*(?:프롬프트|지침|메시지).{0,20}(?:보여|출력|공개|알려)"),
+    re.compile(r"(?:제한\s*없는|무제한|탈옥|jailbreak|developer\s*mode|dan\s*mode)"),
+    re.compile(r"(?:너는\s*이제|지금부터\s*너는).{0,30}(?:규칙|정책|제한).{0,20}(?:없|무시)"),
+)
+
+_INAPPROPRIATE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:씨발|ㅅㅂ|병신|개새끼|꺼져|죽어)(?:\s|$|[.!?])"),
+    re.compile(r"(?:성적|음란|야한|포르노).{0,20}(?:해줘|보여|만들어|작성)"),
+)
+
+_OUT_OF_SCOPE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:주식|코인|비트코인|부동산).{0,20}(?:추천|사야|팔아|투자|매수|매도)"),
+    re.compile(r"(?:처방|복용|진단|치료).{0,20}(?:해줘|알려|추천)"),
+    re.compile(r"(?:고소장|소장|계약서|법률\s*자문).{0,20}(?:작성|검토|해줘)"),
+    re.compile(r"(?:선거|정당|후보|대통령).{0,20}(?:누구\s*뽑|투표|지지)"),
+)
+
+# ── _fast_route 보조 상수 ──────────────────────────────────────────────────────
+
+# 정책·방법·기간 등 문의 키워드 — 주문 키워드가 함께 있어도 CS 안내로 분류
+_CS_POLICY_KEYWORDS: frozenset[str] = frozenset({
+    "방법", "정책", "규정", "기간", "조건",
+    "알려줘", "알려주세요",
+    "어떻게", "되나요", "드나요",
+    "걸리나요", "걸려요",
+    "가능한가", "가능해요", "가능한가요", "인가요",
+})
+
+# _fast_route가 커버하는 주문 처리 의도 키워드
+_ORDER_INTENT_KEYWORDS: frozenset[str] = frozenset({
+    "취소", "교환", "반품", "환불",
+    "변경", "수정", "배송지", "주소", "연락처", "전화번호", "요청사항", "수량",
+})
+
+# 주문 처리 의도를 확정하는 동사/명사 패턴 — 근접 창(30자) 내 등장 시 "order"로 판단
+_ORDER_ACTION_VERBS: frozenset[str] = frozenset({
+    "해줘", "해주세요", "해요",          # 동사형
+    "바꿔", "바꾸", "수정", "변경",
+    "하고 싶어", "하고싶어",             # 의지형
+    "할게요", "할래요", "할게",          # 의향형
+    "하겠습니다",
+    "신청", "접수해",                    # 명사/복합 동사
+    "도와주세요",
+    "원해", "원합니다", "원해요",
+})
+
+# 주문 키워드와 동사 사이 최대 거리(문자 수) — 초과 시 관련 없는 문장으로 판단
+_ORDER_VERB_PROXIMITY: int = 30
+
 
 # ── Supervisor 도구 스키마 (Pydantic → LLM 라우팅용) ──────────────────────────
 
@@ -73,10 +181,30 @@ class CallCSAgentInput(BaseModel):
     """
     model_config = ConfigDict(title="call_cs_agent")
     query: str = Field(description="CS 에이전트에게 전달할 질문")
+    tool_hint: Literal[
+        "search_faq",
+        "search_policy",
+        "get_order_status",
+        "search_products",
+        "get_product_detail",
+    ] | None = Field(
+        default=None,
+        description=(
+            "CS 에이전트가 바로 실행해도 되는 read-only 도구 힌트. "
+            "확실하지 않으면 null로 두세요."
+        ),
+    )
+    tool_args: dict | None = Field(
+        default=None,
+        description=(
+            "tool_hint에 전달할 도구 인자. 도구 인자를 확실히 구성할 수 있을 때만 제공하세요. "
+            "예: search_products는 {'query':'딸기','check_stock':true,'limit':5}."
+        ),
+    )
 
 
 class CallOrderAgentInput(BaseModel):
-    """주문 취소·교환·반품 접수를 Order 에이전트에게 위임합니다.
+    """주문 취소·교환·반품·변경 접수를 Order 에이전트에게 위임합니다.
     반드시 로그인한 사용자에게만 사용합니다. 정책 안내가 아닌 실제 접수 처리입니다.
     """
     model_config = ConfigDict(title="call_order_agent")
@@ -129,12 +257,35 @@ class SupervisorExecutor:
         session_id: int | None = None,
         context: RequestContext | None = None,
     ) -> AgentResult:
+        # ── [DIAG] 진단용 로그 — 확인 후 제거 예정 ──────────────────────────
+        logger.info("[DIAG] SupervisorExecutor.run 진입 — user_id=%s session_id=%s", user_id, session_id)
+        # ────────────────────────────────────────────────────────────────────
         ctx = context or RequestContext.build(user_id)
         suffix = ctx.to_system_suffix()
         input_with_ctx = input_system + suffix
         # output_system 파라미터는 인터페이스 호환성 유지용 — 내부적으로 미사용
 
-        # 1순위: 진행 중인 OrderGraph 플로우 → Supervisor LLM 판단 없이 직접 재개
+        # 0순위: 내부 운영 정보·민감 정보 요청은 LLM/도구 호출 전에 구조적으로 차단한다.
+        refusal_reason = _preflight_refusal_reason(user_message)
+        if refusal_reason:
+            logger.info("[supervisor] preflight refusal — user_id=%s session_id=%s intent=other reason=%s", ctx.user_id, session_id, refusal_reason)
+            return AgentResult(
+                answer=refusal_response(refusal_reason),
+                intent="other",
+                escalated=False,
+                tools_used=["preflight_refusal"],
+            )
+
+        # 1순위: 상품명/카테고리 없는 재고 조회는 LLM 표현 변동 없이 필요한 정보만 요청한다.
+        if _is_vague_stock_request(user_message):
+            return AgentResult(
+                answer=STOCK_QUERY_NEEDS_TARGET,
+                intent="stock",
+                escalated=False,
+                tools_used=[],
+            )
+
+        # 2순위: 진행 중인 OrderGraph 플로우 → Supervisor LLM 판단 없이 직접 재개
         if session_id and user_id and await self._has_pending_order_flow(session_id):
             response_text = await self._call_order_agent(user_message, user_id, session_id, db)
             return AgentResult(
@@ -144,7 +295,7 @@ class SupervisorExecutor:
                 tools_used=["call_order_agent"],
             )
 
-        # 2순위: CS 에이전트 교환/반품 선택지 제시 후 사용자 선택 → OrderGraph 직접 라우팅
+        # 3순위: CS 에이전트 교환/반품 선택지 제시 후 사용자 선택 → OrderGraph 직접 라우팅
         # "교환" 단독 메시지는 action verb가 없어 _fast_route가 "cs"로 잘못 라우팅하는 문제 수정
         if _is_cs_handoff_reply(user_message, history):
             if not user_id or not session_id:
@@ -165,10 +316,10 @@ class SupervisorExecutor:
                 tools_used=["call_order_agent"],
             )
 
-        # 3순위: 명확한 접수 패턴 fast-path — Supervisor LLM 호출 생략
-        # 동사 결합형·신청 명사형처럼 접수 의도가 100% 명확한 패턴만 해당합니다.
-        # 그 외 모든 경우(정책 문의, 단순 키워드, 애매한 표현)는 Supervisor LLM이 판단합니다.
-        if _is_order_fastpath(user_message):
+        # 4순위: 명확한 주문 처리 요청은 OrderGraph로 직접 라우팅한다.
+        # _fast_route는 정책·방법 문의를 먼저 차단한 뒤, 주문 키워드와 실행 의지가
+        # 가까이 붙은 표현("주문 취소하고 싶어")만 order로 판정한다.
+        if _fast_route(user_message) == "order":
             if not user_id or not session_id:
                 return AgentResult(
                     answer=LOGIN_REQUIRED,
@@ -184,7 +335,7 @@ class SupervisorExecutor:
                 tools_used=["call_order_agent"],
             )
 
-        # 4순위: Supervisor LLM — CS / Order 에이전트 선택을 LLM에 위임
+        # 5순위: Supervisor LLM — CS / Order 에이전트 선택을 LLM에 위임
         return await self._run_loop(
             db=db,
             user_message=user_message,
@@ -213,6 +364,9 @@ class SupervisorExecutor:
         metrics: list[ToolMetricData] = []
 
         for iteration in range(self.max_iterations):
+            # ── [DIAG] LLM 호출 직전 ─────────────────────────────────────
+            logger.info("[DIAG] _run_loop LLM 호출 시작 — iteration=%d", iteration)
+            # ─────────────────────────────────────────────────────────────
             response: AIMessage = await self._llm.ainvoke(
                 [SystemMessage(content=input_system)] + messages
             )
@@ -235,7 +389,7 @@ class SupervisorExecutor:
                 )
                 _log_trace(trace, user_message)
                 return AgentResult(
-                    answer=answer, intent=intent, escalated=False,
+                    answer=_finalize_customer_answer(answer, trace), intent=intent, escalated=False,
                     tools_used=tools_used, trace=trace, metrics=metrics,
                 )
 
@@ -315,7 +469,7 @@ class SupervisorExecutor:
                 if isinstance(cs_result, AgentResult):
                     _log_trace(trace, user_message)
                     return AgentResult(
-                        answer=_parse_answer(cs_result.answer),
+                        answer=_finalize_customer_answer(_parse_answer(cs_result.answer), trace),
                         intent=cs_result.intent,
                         escalated=cs_result.escalated,
                         tools_used=tools_used + cs_result.tools_used,
@@ -389,6 +543,8 @@ class SupervisorExecutor:
             history=[],
             input_system=self.cs_input_prompt,
             output_system=self.cs_output_prompt,
+            tool_hint=tc["args"].get("tool_hint"),
+            tool_args=tc["args"].get("tool_args"),
         )
         latency_ms = int((time.monotonic() - t0) * 1000)
         logger.info("[supervisor] call_cs_agent latency=%dms", latency_ms)
@@ -410,6 +566,7 @@ class SupervisorExecutor:
     ) -> str:
         from langgraph.types import Command
         from ai.agent.order_graph.state import OrderState
+        from ai.agent.order_graph.nodes import _is_flow_abort_intent
 
         config = {"configurable": {"thread_id": str(session_id), "db": db}}
 
@@ -420,10 +577,15 @@ class SupervisorExecutor:
             new_action = force_action if force_action else _detect_order_action(query)
 
             pending_action = snapshot.values.get("action") if snapshot.next else None
+            pending_abort = (
+                pending_action is not None
+                and _is_flow_abort_intent(query, pending_action)
+            )
             intent_mismatch = (
                 pending_action is not None
+                and not pending_abort
                 and pending_action != new_action
-                and any(kw in query for kw in _EXCHANGE_KEYWORDS | _CANCEL_KEYWORDS)
+                and any(kw in query for kw in _EXCHANGE_KEYWORDS | _CANCEL_KEYWORDS | _CHANGE_KEYWORDS)
             )
 
             if snapshot.next and not intent_mismatch:
@@ -445,6 +607,8 @@ class SupervisorExecutor:
                     "selected_items": [],
                     "reason": None,
                     "refund_method": None,
+                    "change_type": None,
+                    "change_detail": None,
                     "stock_note": "",
                     "confirmed": None,
                     "abort": False,
@@ -476,6 +640,29 @@ class SupervisorExecutor:
 # ── 헬퍼 ───────────────────────────────────────────────────────────────────────
 
 
+def _preflight_refusal_reason(user_message: str) -> str | None:
+    """LLM/도구 호출 전에 차단해야 하는 요청 사유를 판별한다.
+
+    고객 상담 채널에서 다루면 안 되는 요청을 supervisor 진입부에서 먼저
+    끊어, 잘못된 도구 선택이나 오류 메시지로 민감 정보 조회 가능성이
+    암시되는 상황을 방지한다.
+    """
+    msg = re.sub(r"\s+", " ", user_message.strip().lower())
+    if not msg:
+        return None
+    if any(pattern.search(msg) for pattern in _JAILBREAK_PATTERNS):
+        return "jailbreak"
+    if any(pattern.search(msg) for pattern in _OTHER_USER_INFO_PATTERNS):
+        return "other_user_info"
+    if any(pattern.search(msg) for pattern in _INTERNAL_INFO_PATTERNS):
+        return "internal_info"
+    if any(pattern.search(msg) for pattern in _INAPPROPRIATE_PATTERNS):
+        return "inappropriate"
+    if any(pattern.search(msg) for pattern in _OUT_OF_SCOPE_PATTERNS):
+        return "out_of_scope"
+    return None
+
+
 def _is_order_fastpath(user_message: str) -> bool:
     """접수 실행 의도가 명확한 패턴인지 확인 — Supervisor LLM 호출 생략 조건.
 
@@ -503,10 +690,13 @@ def _is_order_fastpath(user_message: str) -> bool:
 
 
 def _detect_order_action(query: str) -> str:
-    """쿼리에서 교환/취소 의도 감지. 기본값: 'cancel'."""
+    """쿼리에서 교환/취소/변경 의도 감지. 기본값: 'cancel'."""
     q = query.lower()
     exchange_score = sum(1 for kw in _EXCHANGE_KEYWORDS if kw in q)
     cancel_score = sum(1 for kw in _CANCEL_KEYWORDS if kw in q)
+    change_score = sum(1 for kw in _CHANGE_KEYWORDS if kw in q)
+    if change_score > max(exchange_score, cancel_score):
+        return "change"
     return "exchange" if exchange_score > cancel_score else "cancel"
 
 
@@ -527,6 +717,54 @@ def _is_cs_handoff_reply(user_message: str, history: list[dict]) -> bool:
         return False
     normalized = re.sub(r"\s+", "", user_message.strip().lower())
     return normalized in {re.sub(r"\s+", "", s) for s in _CS_HANDOFF_SELECTIONS}
+
+
+def _fast_route(message: str) -> str:
+    """규칙 기반 사전 라우팅 — 'order' 또는 'cs' 반환.
+
+    _is_order_fastpath()보다 넓은 범위를 커버하는 완전한 규칙 기반 분류기.
+    동사형("취소해줘"), 의지형("반품하고 싶어요"), 접수 명사형("교환 접수해줘") 모두 처리.
+
+    우선순위:
+    1. CS 문의 키워드(정책/방법/규정 등) → "cs"  — 주문 키워드가 함께 있어도 우선
+    2. 명확한 접수 패턴(_is_order_fastpath) → "order"
+    3. 주문 키워드 + 근접 동사(30자 이내) → "order"
+    4. 그 외(키워드 단독, 무관한 내용) → "cs"
+
+    평가 실험(tests/eval/test_routing_accuracy.py)에서 단일 에이전트 baseline과
+    비교 측정에 사용됩니다.
+    """
+    msg = message.strip().lower()
+
+    # 1. CS 문의 키워드 최우선 차단
+    if any(kw in msg for kw in _CS_POLICY_KEYWORDS):
+        return "cs"
+
+    # 2. 로그인 후 자주 누르는 단축 실행 표현
+    if msg in _ORDER_SHORT_ACTION_PHRASES:
+        return "order"
+
+    # 3. 명확한 접수 패턴(fastpath)
+    if _is_order_fastpath(message):
+        return "order"
+
+    # 4. 주문 키워드 + 근접 동사 — 키워드 위치에서 30자 창 내 탐색
+    for kw in _ORDER_INTENT_KEYWORDS:
+        if kw not in msg:
+            continue
+        kw_idx = msg.find(kw)
+        window = msg[kw_idx: kw_idx + _ORDER_VERB_PROXIMITY]
+        if any(v in window for v in _ORDER_ACTION_VERBS):
+            return "order"
+
+    # 5. 키워드 단독·무관 내용 → CS
+    return "cs"
+
+
+def _is_vague_stock_request(message: str) -> bool:
+    normalized = re.sub(r"\s+", " ", message.strip().lower())
+    compact = re.sub(r"\s+", "", normalized)
+    return normalized in _VAGUE_STOCK_MESSAGES or compact in _VAGUE_STOCK_COMPACT_MESSAGES
 
 
 def _resolve_handoff_action(user_message: str) -> str:

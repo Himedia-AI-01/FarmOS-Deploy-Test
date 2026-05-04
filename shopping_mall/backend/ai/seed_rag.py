@@ -383,13 +383,36 @@ def chunk_by_sections(
     return chunks
 
 
+# ── 청크 증강 질문 패턴 (Question Augmentation) ────────────────────────────
+# Dense 임베딩 공간에서 사용자 쿼리와 청크 어휘 거리가 먼 경우,
+# 청크 앞에 대표 질문 패턴을 삽입하여 임베딩 유사도를 높인다.
+# key: (컬렉션명, 조항 번호) → value: 질문 패턴 문자열
+_CHUNK_QUESTION_AUGMENTATIONS: dict[tuple[str, str], str] = {
+    # 회원정책 제1조 — "처음 가입하면 혜택 주나요?" 유형
+    # 청크: "웰컴 쿠폰 3,000원 자동 지급" / 쿼리: "처음 가입 혜택"
+    ("membership_policy", "1"): "처음 가입하면 어떤 혜택이 있나요? 신규 가입 쿠폰이 있나요?",
+    # 회원정책 제2조 — "탈퇴 후 바로 재가입할 수 있나요?" 유형
+    # 청크: "탈퇴 후 30일간 재가입이 제한됩니다" / 쿼리: "바로 다시 가입"
+    ("membership_policy", "2"): "탈퇴하고 나서 바로 다시 가입할 수 있나요? 재가입 제한 기간이 있나요?",
+    # 회원정책 제7조 — "포인트 얼마부터 쓸 수 있어요?" 유형
+    # 청크: "최소 1,000포인트 이상만 사용" / BM25 간섭 사례
+    ("membership_policy", "7"): "포인트 최소 사용 금액이 얼마인가요? 몇 포인트부터 사용할 수 있나요?",
+}
+
+
 def chunk_by_articles(
-    text: str, source: str, doc_title: str = "", max_size: int = MAX_CHUNK_SIZE
+    text: str, source: str, doc_title: str = "", max_size: int = MAX_CHUNK_SIZE,
+    collection_name: str = "",
 ) -> list[dict]:
     """제X장 > 제X조 체계로 텍스트를 청크로 분할.
 
     각 청크 앞에 출처 프리픽스를 붙여 LLM이 조·항을 인용할 수 있게 한다.
     max_size 초과 조항은 줄(항) 경계에서 추가 분할된다.
+    _CHUNK_QUESTION_AUGMENTATIONS에 등록된 조항은 청크 본문 앞에
+    대표 질문 패턴을 삽입하여 Dense 임베딩 유사도를 높인다.
+
+    Args:
+        collection_name: 질문 증강 매핑 조회에 사용 (seed_policy_collection에서 전달)
 
     Returns:
         [{"id": str, "text": str, "metadata": dict}, ...]
@@ -445,6 +468,13 @@ def chunk_by_articles(
             chunk_text = f"{prefix}\n{content}"
         else:
             chunk_text = content
+
+        # 질문 증강: 등록된 (컬렉션, 조항 번호) 조합에 대표 질문 패턴 삽입
+        aug_key = (collection_name, sp["num"])
+        if aug_key in _CHUNK_QUESTION_AUGMENTATIONS:
+            aug_q = _CHUNK_QUESTION_AUGMENTATIONS[aug_key]
+            chunk_text = f"Q: {aug_q}\n{chunk_text}"
+
         chunk_id = f"{source}_art{sp['num']}"
 
         metadata: dict = {
@@ -491,7 +521,7 @@ def seed_policy_collection(client, ef, filepath: str, collection_name: str) -> i
     # 두 경우 모두 doc_title을 전달하여 출처 프리픽스가 붙게 한다
     doc_title = COLLECTION_TO_DOC_TITLE.get(collection_name, collection_name)
     if _ARTICLE_RE.search(body):
-        chunks = chunk_by_articles(body, source, doc_title)
+        chunks = chunk_by_articles(body, source, doc_title, collection_name=collection_name)
         if not chunks:
             chunks = chunk_by_sections(body, source, doc_title)
     else:

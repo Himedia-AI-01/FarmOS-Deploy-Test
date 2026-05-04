@@ -26,12 +26,19 @@ export interface ItemOption {
   label: string;
 }
 
+export interface EditableInput {
+  label: string;
+  defaultValue: string;
+  guide: string;
+}
+
 export type OrderFlowUI =
   | { type: 'confirm' }
   | { type: 'cs-handoff' }
   | { type: 'order-select'; items: OrderSelectItem[] }
   | { type: 'simple-options'; items: SimpleOption[] }
   | { type: 'item-select'; items: ItemOption[] }
+  | { type: 'editable-input'; input: EditableInput }
   | null;
 
 /**
@@ -42,6 +49,7 @@ export type OrderFlowUI =
  *   confirm       → "(네 / 아니오)"
  *   order-select  → "번호(1, 2" + "를 입력해 주세요"
  *   item-select   → "교환할 상품과 수량을 알려주세요"
+ *   editable-input→ "현재 등록된 내용:" + "수정할 내용을 확인한 뒤 전송해 주세요"
  *   simple-options→ "번호 또는 사유를 입력해 주세요" | "번호를 입력해 주세요"
  */
 export function parseOrderFlowMessage(text: string): OrderFlowUI {
@@ -54,13 +62,13 @@ export function parseOrderFlowMessage(text: string): OrderFlowUI {
   }
 
   // 2. 최종 확인: (네 / 아니오)
-  //    prompts: cancel_summary, exchange_summary, stock_insufficient
+  //    prompts: cancel_summary, exchange_summary, change_summary, stock_insufficient
   if (text.includes('(네 / 아니오)')) {
     return { type: 'confirm' };
   }
 
   // 3. 주문 선택: "번호(1, 2 …)를 입력해 주세요" 패턴
-  //    prompts: select_order_cancel, select_order_exchange, invalid_order_selection
+  //    prompts: select_order_cancel, select_order_exchange, select_order_change, invalid_order_selection
   if (text.includes('번호(1, 2') && text.includes('를 입력해 주세요')) {
     const items: OrderSelectItem[] = [];
     const lines = text.split('\n');
@@ -93,9 +101,33 @@ export function parseOrderFlowMessage(text: string): OrderFlowUI {
     return { type: 'item-select', items };
   }
 
-  // 5. 사유 선택 / 환불 방법 선택
+  // 5. 주문 변경 상세 입력: 현재 등록값을 input 기본값으로 사용
+  //    prompts: change_detail
+  if (
+    text.includes('현재 등록된 내용:') &&
+    text.includes('수정할 내용을 확인한 뒤 전송해 주세요')
+  ) {
+    const label = text.split('\n')[0]?.trim() || '변경할 내용';
+    const currentMarker = '현재 등록된 내용:\n';
+    const submitMarker = '\n\n수정할 내용을 확인한 뒤 전송해 주세요';
+    const currentStart = text.indexOf(currentMarker) + currentMarker.length;
+    const currentEnd = text.indexOf('\n\n', currentStart);
+    const guideStart = currentEnd >= 0 ? currentEnd + 2 : currentStart;
+    const guideEnd = text.indexOf(submitMarker, guideStart);
+
+    return {
+      type: 'editable-input',
+      input: {
+        label,
+        defaultValue: currentEnd >= 0 ? text.slice(currentStart, currentEnd).trim() : '',
+        guide: guideEnd >= 0 ? text.slice(guideStart, guideEnd).trim() : '',
+      },
+    };
+  }
+
+  // 6. 사유 선택 / 환불 방법 선택
   //    prompts: cancel_reason, exchange_reason  → "번호 또는 사유를 입력해 주세요"
-  //             refund_method                   → "번호를 입력해 주세요"
+  //             refund_method, change_type      → "번호를 입력해 주세요"
   if (
     text.includes('번호 또는 사유를 입력해 주세요') ||
     text.includes('번호를 입력해 주세요')

@@ -139,12 +139,12 @@ export function useCloseSession() {
 
       return { previousSessions, previousActiveSession };
     },
-    onSuccess: (closedSession, { userId }) => {
+    onSuccess: (_closedSession, { userId }) => {
       // Refetch to ensure data is synchronized
       queryClient.refetchQueries({ queryKey: ['chat-sessions', userId] });
       queryClient.refetchQueries({ queryKey: ['chat-active-session', userId] });
     },
-    onError: (error, { userId }, context) => {
+    onError: (_error, { userId }, context) => {
       // Revert on error
       if (context?.previousSessions) {
         queryClient.setQueryData(['chat-sessions', userId], context.previousSessions);
@@ -251,7 +251,7 @@ export function useSendMessage() {
 
       return { previousMessages, previousSessions };
     },
-    onSuccess: (data, { userId, sessionId }, context) => {
+    onSuccess: (data, { userId, sessionId }, _context) => {
       // Update messages cache with bot response
       const currentMessages = queryClient.getQueryData(['chat-session-messages', userId, sessionId]) as ChatSessionMessage[] | undefined;
       if (currentMessages) {
@@ -271,7 +271,7 @@ export function useSendMessage() {
       // Refetch sessions list to update with the actual response
       queryClient.refetchQueries({ queryKey: ['chat-sessions', userId] });
     },
-    onError: (error, { userId, sessionId }, context) => {
+    onError: (_error, { userId, sessionId }, context) => {
       // Revert to previous data on error
       if (context?.previousMessages) {
         queryClient.setQueryData(['chat-session-messages', userId, sessionId], context.previousMessages);

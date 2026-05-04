@@ -6,7 +6,6 @@ export interface ChatLog {
   question: string;
   answer: string;
   escalated: boolean;
-  rating: number | null;
   created_at: string;
 }
 

@@ -1,10 +1,27 @@
 """LangChain LLM 팩토리 — Primary(OpenAI 호환) + Fallback(Claude)."""
+import logging
 import os
 
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+_REASONING_MODEL_MARKERS = (
+    "gpt-5",
+    "o1",
+    "o3",
+    "o4",
+)
+
+
+def _supports_reasoning_effort(model: str) -> bool:
+    """Return True for model families that accept reasoning_effort."""
+    normalized = model.lower().split("/")[-1]
+    return normalized.startswith(_REASONING_MODEL_MARKERS)
 
 
 def _set_langsmith_env() -> None:
@@ -23,11 +40,27 @@ def _set_langsmith_env() -> None:
 
 
 def build_primary_llm() -> ChatOpenAI:
-    """Primary LLM — OpenAI 호환 엔드포인트 (LiteLLM 프록시 / OpenRouter / OpenAI)."""
+    """Primary LLM — OpenAI 호환 엔드포인트 (LiteLLM 프록시 / OpenRouter / OpenAI).
+
+    reasoning_effort는 LLM_REASONING_EFFORT 환경변수로 제어합니다.
+    빈 문자열이면 파라미터를 전달하지 않아 모델 기본값을 사용합니다.
+    """
+    kwargs: dict = {}
+    normalized_effort = settings.llm_reasoning_effort.strip().lower()
+    if normalized_effort and _supports_reasoning_effort(settings.litellm_model):
+        kwargs["reasoning_effort"] = normalized_effort
+    elif normalized_effort:
+        logger.warning(
+            "LLM_REASONING_EFFORT=%s ignored for non-reasoning model %s",
+            normalized_effort,
+            settings.litellm_model,
+        )
+
     return ChatOpenAI(
         base_url=settings.litellm_url,
         api_key=settings.litellm_api_key,
         model=settings.litellm_model,
+        **kwargs,
     )
 
 

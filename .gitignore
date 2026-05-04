@@ -14,9 +14,11 @@ build/
 
 # ========== ChromaDB ==========
 chroma_data/
+shopping_mall/backend/ai/data/bm25_index.json
 
-# ========== 정책 문서 (PDF/DOCX — 로컬 배치, 커밋 제외) ==========
-shopping_mall/backend/ai/docs/
+# ========== Logs ==========
+logs/
+*.log
 
 # ========== Environment variables ==========
 .env
@@ -41,9 +43,6 @@ Thumbs.db
 
 # ========== bkit ==========
 .bkit/
-
-# ========== Logs ==========
-*.log
 
 # ========== Benchmark ==========
 # 벤치마킹 파일에 불과하므로 해당 파일의 소유주(JunePark2018)가 업로드 제외 처리함

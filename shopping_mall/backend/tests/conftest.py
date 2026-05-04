@@ -158,6 +158,8 @@ def make_mock_db(orders=None, shipments=None, products=None, chat_session=None):
     # filter().first() → 첫 번째 shipment
     shipment_obj = (shipments or [None])[0]
     shipment_mock.filter.return_value.first.return_value = shipment_obj
+    # filter().all() → 주문 N건에 대한 shipment 일괄 조회
+    shipment_mock.filter.return_value.all.return_value = shipments or []
 
     # ── Product 체인 ──────────────────────────────────────────────
     # filter().order_by().limit().all() → products

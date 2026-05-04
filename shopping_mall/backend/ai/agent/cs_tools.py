@@ -85,6 +85,12 @@ _ORDER_STATUS_KO: dict[str, str] = {
     "delivered": "배송 완료",
     "cancelled": "취소 완료",
     "returned":  "반품 완료",
+    # Legacy / integration values that may appear in seeded data.
+    "paid":       "결제 완료",
+    "registered": "배송 준비 중",
+    "picked_up":  "배송 중 (픽업 완료)",
+    "in_transit": "배송 중",
+    "shipping":   "배송 중",
 }
 _WEEKDAY_KO = ["월", "화", "수", "목", "금", "토", "일"]
 
@@ -149,18 +155,20 @@ class SearchFaqInput(BaseModel):
 
 class SearchPolicyInput(BaseModel):
     query: str = Field(description="정책 관련 질문")
-    policy_type: str = Field(
-        default="all",
+    policy_type: Literal["return", "payment", "membership", "delivery", "quality", "service", "all"] = Field(
         description=(
-            "정책 종류: 'return'(반품·교환) | 'payment'(결제·적립금) | "
-            "'membership'(회원) | 'delivery'(배송) | 'quality'(품질) | "
-            "'service'(고객 서비스) | 'all'(전체)"
+            "검색할 정책 종류를 반드시 하나 명시하세요. "
+            "'return'(반품·교환·환불) | 'payment'(결제·적립금) | "
+            "'membership'(회원·등급·혜택) | 'delivery'(배송·물류) | "
+            "'quality'(상품 품질 보증) | 'service'(고객 서비스 운영). "
+            "여러 정책을 넓게 확인해야 할 때만 'all'을 사용하세요. "
+            "해당하는 정책이 없으면 search_faq를 사용하세요."
         ),
     )
 
 
 class GetOrderStatusInput(BaseModel):
-    order_id: int | None = Field(default=None, description="특정 주문 ID (없으면 최근 3건 조회)")
+    order_id: int | None = Field(default=None, description="특정 주문 번호 (없으면 최근 3건 조회)")
 
 
 class SearchProductsInput(BaseModel):
@@ -192,7 +200,7 @@ class RefuseRequestInput(BaseModel):
 
 
 class CancelOrderInput(BaseModel):
-    order_id: int = Field(description="취소할 주문 ID")
+    order_id: int = Field(description="취소할 주문 번호")
     reason: str = Field(
         default="단순 변심",
         description="취소 사유 (예: '단순 변심', '배송 지연', '상품 불량')",
@@ -204,7 +212,7 @@ class CancelOrderInput(BaseModel):
 
 
 class ProcessRefundInput(BaseModel):
-    order_id: int = Field(description="환불 처리할 주문 ID")
+    order_id: int = Field(description="환불 처리할 주문 번호")
     refund_method: Literal["원결제 수단", "포인트"] = Field(
         description="환불 방법: '원결제 수단' | '포인트'",
     )
@@ -258,6 +266,17 @@ def build_cs_tools(
             where=where,
         )
 
+        # 서브카테고리 필터로 결과 없으면 전체 재시도
+        if not pairs and subcategory:
+            logger.info(
+                f"[search_faq] subcategory='{subcategory}' 결과 없음 → 전체 FAQ 재검색 (fallback)"
+            )
+            pairs = rag_service.retrieve_with_metadata(
+                nq, "faq",
+                top_k=top_k,
+                distance_threshold=settings.rag_distance_threshold,
+            )
+
         if not pairs:
             return "FAQ에서 관련 내용을 찾을 수 없습니다."
 
@@ -278,7 +297,7 @@ def build_cs_tools(
         seen: set[str] = set()
         candidates: list[str] = []
         for sq in sub_queries:
-            for doc in rag_service.hybrid_retrieve(sq, collections, top_k=5, distance_threshold=settings.rag_distance_threshold):
+            for doc in rag_service.hybrid_retrieve(sq, collections, top_k=3, distance_threshold=settings.rag_distance_threshold):
                 if doc not in seen:
                     seen.add(doc)
                     candidates.append(doc)

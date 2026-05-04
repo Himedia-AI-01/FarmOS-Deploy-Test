@@ -1,8 +1,8 @@
 import { useListSessions, useCreateSession, useActiveSession, useDeleteSession } from './useChatSession.ts';
-import type { ChatSession } from './types.ts';
 import { format } from 'date-fns';
 import { ko } from 'date-fns/locale';
 import { useState } from 'react';
+import toast from 'react-hot-toast';
 
 const WELCOME_MESSAGE = '안녕하세요! FarmOS 마켓 고객지원입니다.\n무엇이든 물어보세요 😊';
 
@@ -19,8 +19,6 @@ export default function ChatSessionList({ userId, onSessionSelect, onClose }: Ch
   const { mutate: deleteSession, isPending: isDeleting } = useDeleteSession();
   const [menuOpen, setMenuOpen] = useState<number | null>(null);
 
-  const hasActiveSession = !!activeSession;
-
   const handleInquiry = () => {
     if (!userId) return;
 
@@ -34,6 +32,9 @@ export default function ChatSessionList({ userId, onSessionSelect, onClose }: Ch
     createSession(userId, {
       onSuccess: (newSession) => {
         onSessionSelect(newSession.id);
+      },
+      onError: () => {
+        toast.error('채팅 세션 생성에 실패했습니다. 잠시 후 다시 시도해주세요.');
       },
     });
   };
@@ -112,9 +113,13 @@ export default function ChatSessionList({ userId, onSessionSelect, onClose }: Ch
         <div className="divide-y divide-gray-100">
           {sessions.map((session) => (
             <div key={session.id} className="relative">
-              <button
+              {/* button 안에 button 중첩 불가 — div + role="button"으로 외부 클릭 영역 처리 */}
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => onSessionSelect(session.id)}
-                className={`w-full text-left px-4 py-3 transition-all ${
+                onKeyDown={(e) => e.key === 'Enter' && onSessionSelect(session.id)}
+                className={`w-full text-left px-4 py-3 transition-all cursor-pointer ${
                   session.status === 'active'
                     ? 'bg-gradient-to-r from-green-50 to-white border-l-4 border-l-[#03C75A] hover:from-green-100 hover:to-white'
                     : 'bg-white hover:bg-gray-50'
@@ -179,7 +184,7 @@ export default function ChatSessionList({ userId, onSessionSelect, onClose }: Ch
                     )}
                   </div>
                 </div>
-              </button>
+              </div>
             </div>
           ))}
         </div>

@@ -1,6 +1,24 @@
+import os
+import sys
+
+# Windows: bge-m3(임베딩)와 CrossEncoder(리랭커)가 각각 torch를 로딩할 때
+# OpenMP DLL 중복으로 세그폴트가 발생하는 문제를 방지.
+# torch가 import되기 전, 모든 import보다 먼저 설정해야 효과가 있다.
+if sys.platform.startswith("win"):
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+    # Windows 기본 이벤트 루프는 ProactorEventLoop인데,
+    # psycopg3 async(AsyncPostgresSaver)는 SelectorEventLoop를 요구한다.
+    # uvicorn이 이벤트 루프를 생성하기 전에 정책을 설정해야 효과가 있다.
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+from sqlalchemy import text
 
 
 def _setup_app_logging() -> None:
@@ -35,19 +53,36 @@ def _setup_app_logging() -> None:
 # 워커 프로세스 전체 생애 동안 chatbot.log에 UTF-8로 기록된다.
 _setup_app_logging()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.database import Base, engine
 from app.routers import products, categories, cart, orders, users, reviews, stores, wishlists
 from app.routers import shipments, calendar, reports, analytics, chatbot, admin
+from app.routers import faq
 from app import models  # noqa: F401 - Import models to register them with Base
 
 logger = logging.getLogger(__name__)
 
 # Create tables on startup
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_schema_patches() -> None:
+    """Apply small idempotent schema patches for projects without Alembic."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE shop_tickets "
+                "ADD COLUMN IF NOT EXISTS flags TEXT NOT NULL DEFAULT '[]'"
+            )
+        )
+    logger.info("shop_tickets.flags schema patch ensured.")
+
+
+_ensure_schema_patches()
 
 
 @asynccontextmanager
@@ -88,6 +123,12 @@ async def lifespan(app: FastAPI):
 
         primary = build_primary_llm()
         fallback = build_fallback_llm()
+
+        # FAQ 작성 에이전트 초기화 — 챗봇 서비스와 LLM·RAG 공유
+        from app.routers.faq import set_faq_writer
+        from ai.agent.faq_writer import FaqWriterAgent
+        set_faq_writer(FaqWriterAgent(primary=primary, fallback=fallback, rag_service=rag))
+        logger.info("FaqWriterAgent initialized.")
 
         async with AsyncPostgresSaver.from_conn_string(settings.langgraph_postgres_url) as checkpointer:
             await checkpointer.setup()
@@ -135,6 +176,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """CORSMiddleware 안쪽의 ExceptionMiddleware에 등록되는 전역 핸들러.
+
+    라우터 레벨 try/except를 빠져나온 일반 애플리케이션 예외가
+    Starlette ServerErrorMiddleware까지 전파되면 CORS 헤더가 누락된 채 500이
+    반환될 수 있다. 이 핸들러가 ExceptionMiddleware 안에서 exception을 잡아
+    JSONResponse를 반환함으로써 CORSMiddleware가 헤더를 정상적으로 주입한다.
+    """
+    logger.error(
+        "전역 예외 핸들러 — 처리되지 않은 예외: %s: %s",
+        type(exc).__name__, exc, exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."},
+    )
+
 # Existing routers
 app.include_router(products.router)
 app.include_router(categories.router)
@@ -152,6 +212,7 @@ app.include_router(reports.router)
 app.include_router(analytics.router)
 app.include_router(chatbot.router)
 app.include_router(admin.router)
+app.include_router(faq.router)
 
 
 @app.get("/")

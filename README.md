@@ -278,6 +278,18 @@ RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2   # 선택
 
 ### 개발 서버 실행
 
+팀원용 빠른 실행은 루트의 `Web_Starter.exe`를 권장합니다.
+
+```text
+1. PostgreSQL 실행 및 .env 확인
+2. Web_Starter.exe 실행
+3. 서버 시작 버튼 클릭
+```
+
+`Web_Starter.exe`는 서버를 띄우기 전에 `automation/run.mjs`를 실행해 DB 테이블/row 수를 확인하고, 필요한 경우 시드 흐름을 호출합니다. 쇼핑몰 파트는 추가로 `shop_tickets.flags` 같은 안전한 누락 컬럼을 보강하고, 상품 이미지 URL을 최신 매핑으로 맞춥니다.
+
+수동 실행이 필요할 때는 아래 명령을 사용합니다.
+
 ```bash
 # FarmOS 백엔드
 cd backend && uv run uvicorn main:app --reload
@@ -299,6 +311,16 @@ cd shopping_mall/frontend && npm install && npm run dev
 cd shopping_mall/backend
 uv run python scripts/seed_and_verify.py
 ```
+
+### 쇼핑몰 변경사항 수동 반영
+
+`Web_Starter.exe` 실행 전후로 쇼핑몰 데이터만 다시 맞추고 싶다면 루트에서 아래 명령을 실행합니다.
+
+```bash
+python bootstrap/apply_shop_updates.py
+```
+
+현재 이 스크립트는 상품 더미 이미지 URL을 품목별 외부 이미지 URL로 보정합니다. DB가 비어 있거나 FAQ/RAG 데이터가 부족한 경우에는 `Web_Starter.exe`의 자동화가 `bootstrap/insert_data.py`를 통해 FAQ DB 시딩과 RAG 인덱싱까지 처리합니다.
 
 ---
 

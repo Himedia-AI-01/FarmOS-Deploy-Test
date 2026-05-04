@@ -51,6 +51,9 @@ Action: escalate_to_agent, refuse_request
 | `CS_INPUT_PROMPT` | `llm_with_tools` | 도구 선택 지시 |
 | `CS_OUTPUT_PROMPT` | `output_llm` | 도구 결과 → 최종 답변 합성 |
 
+두 프롬프트 모두 `ai/agent/tone_policy.py`의 `CHATBOT_TONE_POLICY`를 임포트하여 응답 톤앤매너를 적용합니다.
+톤앤매너 정책 변경 시 `tone_policy.py`만 수정하면 됩니다.
+
 ---
 
 ## 인스턴스화 (`app/main.py`)

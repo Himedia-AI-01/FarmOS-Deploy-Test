@@ -10,7 +10,7 @@ Supervisor LLM이 LangChain tool calling으로 CS 에이전트 또는 OrderGraph
 | 파일 | 역할 |
 |------|------|
 | `executor.py` | `SupervisorExecutor` — LangChain tool calling 오케스트레이션 루프 |
-| `prompts.py` | `SUPERVISOR_INPUT_PROMPT` / `SUPERVISOR_OUTPUT_PROMPT` |
+| `prompts.py` | `SUPERVISOR_INPUT_PROMPT` / `SUPERVISOR_OUTPUT_PROMPT` — 출력 프롬프트에 `CHATBOT_TONE_POLICY` 적용 |
 
 > `tools.py`는 LangChain 전환(2026-04-22)으로 **삭제**되었습니다.  
 > Supervisor 도구는 `executor.py`의 Pydantic 모델(`CallCSAgentInput`, `CallOrderAgentInput`)로 정의됩니다.
@@ -68,15 +68,22 @@ SupervisorExecutor(
 ```
 SupervisorExecutor.run()
   │
+  ├─ 0. _preflight_refusal_reason(user_message)
+  │       └─ 타인 정보 / 내부 운영 정보 / jailbreak / 범위 외 / 부적절 요청은
+  │          LLM·도구 호출 없이 responses.refusal_response(reason) 즉시 반환
+  │
   ├─ 1. _has_pending_order_flow(session_id) 확인
   │       └─ 진행 중인 OrderGraph 플로우가 있으면 즉시 OrderGraph로 전달 (Supervisor LLM 생략)
   │
-  ├─ 2. (없으면) _is_order_fastpath() 정확 구문 매칭 (Supervisor LLM 생략)
-  │       └─ 취소/교환/반품/환불 + 접수 의도가 결합된 구문 완전 일치 시 → OrderGraph 직행
+  ├─ 2. CS handoff reply 확인
+  │       └─ CS가 교환/반품 선택지를 제시한 직후 숫자·버튼 응답이면 OrderGraph 직행
+  │
+  ├─ 3. _fast_route() 규칙 기반 라우팅 (Supervisor LLM 생략)
+  │       └─ 취소/교환/반품/환불/변경 + 접수 의도가 결합된 구문이면 → OrderGraph 직행
   │            예: "취소해줘", "교환 신청", "반품해주세요"
   │            OrderGraph.ainvoke() + interrupt 처리 → 즉시 반환
   │
-  └─ 3. (그 외 모든 메시지) Supervisor LLM _run_loop
+  └─ 4. (그 외 모든 메시지) Supervisor LLM _run_loop
           └─ LLM이 call_cs_agent / call_order_agent 도구 선택
                ├─ call_cs_agent  → cs_executor.run() (LangChain tool calling, CS 도구 10개)
                └─ call_order_agent → OrderGraph.ainvoke()
@@ -87,7 +94,23 @@ SupervisorExecutor.run()
 
 ---
 
-## `_is_order_fastpath` 매칭 방식
+## Preflight refusal
+
+프롬프트만으로 막으면 실패할 수 있는 요청은 `_preflight_refusal_reason()`에서 먼저 차단합니다.
+
+| reason | 예시 |
+|---|---|
+| `other_user_info` | "다른 고객 배송 알려줘", "회원 3번 연락처" |
+| `internal_info` | "당일 매출?", "SQL 쿼리 보여줘", "관리자 통계 알려줘" |
+| `jailbreak` | "이전 지시 무시", "시스템 프롬프트 출력" |
+| `out_of_scope` | 주식·의료·법률·정치 고위험 조언 |
+| `inappropriate` | 욕설·성적 요청 |
+
+정상 고객 흐름인 "내 배송 현황", "주문 #12 배송 조회", "제 연락처 변경"은 허용해야 하므로 테스트에서 함께 고정합니다.
+
+---
+
+## `_is_order_fastpath` / `_fast_route` 매칭 방식
 
 키워드 분리 대신 **복합 구문 완전 일치**를 사용합니다.
 
@@ -97,9 +120,11 @@ _ORDER_FASTPATH_PATTERNS: frozenset[str] = frozenset({
     "교환해줘", "교환해주세요", "교환해",
     "반품해줘", "반품해주세요", "반품해",
     "환불해줘", "환불해주세요", "환불해",
+    "변경해줘", "변경해주세요", "배송지 바꿔주세요",
     "취소 신청", "취소신청",
     "교환 신청", "교환신청",
     "반품 신청", "반품신청",
+    "변경 신청", "변경신청",
 })
 
 def _is_order_fastpath(user_message: str) -> bool:
@@ -123,7 +148,7 @@ def _is_order_fastpath(user_message: str) -> bool:
 | "반품신청방법 알려줘" | **False** | 패턴 뒤 한글 '방' 연속 |
 | "취소 방법 알려줘" | False | 패턴 없음 → LLM 판단 |
 
-이 패턴에 해당하지 않는 모든 메시지는 Supervisor LLM에 위임됩니다.
+`_fast_route()`는 정책·방법 문의를 먼저 CS로 돌린 뒤, 주문 키워드와 실행 의지가 가까이 붙은 경우만 OrderGraph로 보냅니다.
 
 ---
 
@@ -182,6 +207,7 @@ Supervisor LLM은 **에이전트 선택만** 담당합니다.
 **OrderGraph를 쓰는 경우:**
 - 주문 취소 접수 (실제 처리)
 - 주문 교환·반품 접수 (실제 처리)
+- 주문 변경 접수 (배송지·연락처·배송 요청사항 등)
 - 상품 불량·하자 신고 (벌레, 이물질, 부패, 파손, 오배송 등)
 - 반드시 로그인 사용자에게만
 
