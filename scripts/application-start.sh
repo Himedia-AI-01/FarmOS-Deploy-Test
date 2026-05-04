@@ -19,8 +19,13 @@ set +a
 LOG "Pulling images (IMAGE_TAG=${IMAGE_TAG:-latest})"
 docker compose pull
 
-LOG "Starting stack"
-docker compose up -d --remove-orphans
+# ────────────────────────────────────────────────
+# Phase 1 — postgres 먼저 띄움 (api 컨테이너는 아직 안 시작)
+#   이유: api lifespan 의 init_db() 와 seed 복원이 race condition 일으킴
+#   → 빈 DB 면 seed 복원을 먼저 끝내고, 그 다음에 api 시작
+# ────────────────────────────────────────────────
+LOG "Phase 1: Starting postgres only"
+docker compose up -d postgres
 
 # ────────────────────────────────────────────────
 # Seed gate — 첫 배포 또는 새 EC2 인스턴스일 때만 S3 dump 복원
@@ -99,6 +104,13 @@ else
   SHOP_PRODUCTS_ROWS=$(count_table "shop_products")
   LOG "Post-restore: rag_pesticide_products=${PESTICIDE_ROWS:-0}, shop_products=${SHOP_PRODUCTS_ROWS:-0}"
 fi
+
+# ────────────────────────────────────────────────
+# Phase 2 — 나머지 서비스 시작 (api / shop-api / nginx)
+#   이 시점에 DB 는 이미 시드 완료된 상태 → api 의 init_db() 는 이미 존재하는 테이블 확인 후 skip
+# ────────────────────────────────────────────────
+LOG "Phase 2: Starting remaining services (api, shop-api, nginx)"
+docker compose up -d --remove-orphans
 
 LOG "Pruning dangling images (older than 72h)"
 docker image prune -f --filter "until=72h" || true
