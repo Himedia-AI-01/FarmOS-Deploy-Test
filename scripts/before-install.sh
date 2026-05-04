@@ -9,6 +9,7 @@ LOG() { echo "[before-install] $(date -Iseconds) $*"; }
 
 LOG "Ensuring /opt/farmos directories"
 sudo mkdir -p /opt/farmos/data/postgres /opt/farmos/data/chroma /opt/farmos/data/hf-cache-shop \
+              /opt/farmos/data/shop-logs \
               /opt/farmos/dist /opt/farmos/shop-dist /opt/farmos/release
 sudo chown -R ubuntu:ubuntu /opt/farmos
 

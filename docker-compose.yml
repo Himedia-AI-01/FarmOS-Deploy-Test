@@ -103,10 +103,14 @@ services:
       CHROMA_DB_PATH: /app/chroma_data
       POLICY_DOCS_DIR: /app/ai/docs
       HF_HOME: /opt/hf-cache
+      # paths.py 의 PROJECT_ROOT 가 컨테이너에서 / 로 떨어져 /logs 권한 에러 발생 →
+      # /app/logs 로 명시 (Dockerfile chown -R appuser:appgroup /app 로 권한 보장).
+      LOG_DIR: /app/logs
       TZ: Asia/Seoul
     volumes:
       - ./data/chroma:/app/chroma_data             # 공유 마운트 (RW with farmos-api — single-user demo)
       - ./data/hf-cache-shop:/opt/hf-cache         # bge-m3 모델 캐시 영속 (재배포 시 재다운로드 방지)
+      - ./data/shop-logs:/app/logs                 # chatbot.log 영속 (호스트에서 tail 가능)
     depends_on:
       postgres:
         condition: service_healthy
