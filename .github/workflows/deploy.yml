@@ -87,7 +87,7 @@ jobs:
   build-shop-and-push:
     name: Build & Push shopping_mall to GHCR
     runs-on: ubuntu-latest
-    timeout-minutes: 30          # bge-m3 모델 preload(~2.2GB) 포함
+    timeout-minutes: 60          # 첫 빌드 (캐시 미존재) 대비 여유. 캐시 hit 후 ~5분
     outputs:
       image_repo: ${{ steps.meta.outputs.image_repo }}
     steps:
@@ -119,8 +119,9 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:sha-${{ github.sha }}
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:latest
-          cache-from: type=gha,scope=shop
-          cache-to: type=gha,mode=max,scope=shop
+          # Registry cache (GHCR 자체를 캐시 저장소로 사용) — GHA cache 의 10GB 한계/export 오버헤드 회피
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:buildcache
+          cache-to:   type=registry,ref=${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:buildcache,mode=max
 
   # ────────────────────────────────────────────────────────────────
   # Job 2: Frontend 빌드 (Vite) — 병렬 실행

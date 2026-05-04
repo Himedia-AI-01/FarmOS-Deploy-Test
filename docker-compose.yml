@@ -96,9 +96,11 @@ services:
     environment:
       CHROMA_DB_PATH: /app/chroma_data
       POLICY_DOCS_DIR: /app/ai/docs
+      HF_HOME: /opt/hf-cache
       TZ: Asia/Seoul
     volumes:
       - ./data/chroma:/app/chroma_data             # 공유 마운트 (RW with farmos-api — single-user demo)
+      - ./data/hf-cache-shop:/opt/hf-cache         # bge-m3 모델 캐시 영속 (재배포 시 재다운로드 방지)
     depends_on:
       postgres:
         condition: service_healthy

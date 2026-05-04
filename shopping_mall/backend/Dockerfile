@@ -43,10 +43,11 @@ COPY . ./
 
 RUN uv sync --frozen
 
-# Preload bge-m3 — kills cold start (~2.2GB, takes 2-3 min on first build)
+# bge-m3 모델은 빌드 타임 preload 하지 않음 (~2.2GB, GH Actions runner 메모리/시간 한계).
+# 컨테이너 첫 사용 시 /opt/hf-cache 에 자동 다운로드 (~1~2분).
+# EC2 t3.large 의 AWS 내부망에서 HF 다운로드 빠름.
 ENV HF_HOME=/opt/hf-cache
-RUN /opt/venv/bin/python -c "from sentence_transformers import SentenceTransformer; \
-    SentenceTransformer('BAAI/bge-m3')"
+RUN mkdir -p /opt/hf-cache
 
 # ============================================================
 # Stage 2: runtime

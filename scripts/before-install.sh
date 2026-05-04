@@ -8,7 +8,8 @@ IFS=$'\n\t'
 LOG() { echo "[before-install] $(date -Iseconds) $*"; }
 
 LOG "Ensuring /opt/farmos directories"
-sudo mkdir -p /opt/farmos/data/postgres /opt/farmos/data/chroma /opt/farmos/dist /opt/farmos/release
+sudo mkdir -p /opt/farmos/data/postgres /opt/farmos/data/chroma /opt/farmos/data/hf-cache-shop \
+              /opt/farmos/dist /opt/farmos/shop-dist /opt/farmos/release
 sudo chown -R ubuntu:ubuntu /opt/farmos
 
 # 직전에 실행 중이던 farmos-api 이미지 태그를 .prev-tag 에 백업

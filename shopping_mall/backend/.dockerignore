@@ -1,0 +1,44 @@
+# Build context slimming for shopping_mall backend image
+# Excludes development artifacts that bloat layer size and slow GHCR push.
+
+# Python bytecode / venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.uv-cache/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Tests (run in CI separately, not needed in runtime image)
+tests/
+
+# Docs / md
+*.md
+CLAUDE.md
+
+# Logs
+logs/
+*.log
+
+# Local data (chroma_data is volume-mounted, not in image)
+chroma_data/
+data/
+
+# Env files (env_file: ./.env in compose, not baked-in)
+.env
+.env.local
+.env.example
+
+# Git
+.git/
+.gitignore
+
+# Misc
+.dockerignore
+Dockerfile
