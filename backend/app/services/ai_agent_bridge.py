@@ -327,7 +327,7 @@ class AiAgentBridge:
             VALUES
                 (:id, :ts, :ct, :pr, :src, :reason,
                  CAST(:action AS jsonb), CAST(:tool_calls AS jsonb),
-                 CAST(:sensor_snapshot AS jsonb), :dur, now())
+                 CAST(:sensor_snapshot AS jsonb), CAST(:dur AS int), now())
             ON CONFLICT (id) DO NOTHING
             """
         )
@@ -382,9 +382,9 @@ class AiAgentBridge:
                 (:day, :ct, 1,
                  jsonb_build_object(CAST(:src AS text), 1),
                  jsonb_build_object(CAST(:pr AS text), 1),
-                 :dur,
-                 COALESCE(CASE WHEN :dur IS NULL THEN 0 ELSE 1 END, 0),
-                 COALESCE(CASE WHEN :dur IS NULL THEN 0 ELSE :dur END, 0),
+                 CAST(:dur AS int),
+                 COALESCE(CASE WHEN CAST(:dur AS int) IS NULL THEN 0 ELSE 1 END, 0),
+                 COALESCE(CASE WHEN CAST(:dur AS int) IS NULL THEN 0 ELSE CAST(:dur AS int) END, 0),
                  :last_at, now())
             ON CONFLICT (day, control_type) DO UPDATE SET
                 count = ai_agent_activity_daily.count + 1,
@@ -399,23 +399,23 @@ class AiAgentBridge:
                     to_jsonb(COALESCE((ai_agent_activity_daily.by_priority->>:pr)::int, 0) + 1)
                 ),
                 duration_count = COALESCE(ai_agent_activity_daily.duration_count, 0)
-                    + CASE WHEN :dur IS NULL THEN 0 ELSE 1 END,
+                    + CASE WHEN CAST(:dur AS int) IS NULL THEN 0 ELSE 1 END,
                 duration_sum = COALESCE(ai_agent_activity_daily.duration_sum, 0)
-                    + CASE WHEN :dur IS NULL THEN 0 ELSE :dur END,
+                    + CASE WHEN CAST(:dur AS int) IS NULL THEN 0 ELSE CAST(:dur AS int) END,
                 avg_duration_ms = CASE
                     WHEN (
                         COALESCE(ai_agent_activity_daily.duration_count, 0)
-                        + CASE WHEN :dur IS NULL THEN 0 ELSE 1 END
+                        + CASE WHEN CAST(:dur AS int) IS NULL THEN 0 ELSE 1 END
                     ) = 0
                         THEN ai_agent_activity_daily.avg_duration_ms
                     ELSE ROUND(
                         (
                             COALESCE(ai_agent_activity_daily.duration_sum, 0)
-                            + CASE WHEN :dur IS NULL THEN 0 ELSE :dur END
+                            + CASE WHEN CAST(:dur AS int) IS NULL THEN 0 ELSE CAST(:dur AS int) END
                         )::numeric
                         / NULLIF(
                             COALESCE(ai_agent_activity_daily.duration_count, 0)
-                            + CASE WHEN :dur IS NULL THEN 0 ELSE 1 END,
+                            + CASE WHEN CAST(:dur AS int) IS NULL THEN 0 ELSE 1 END,
                             0
                         )
                     )::int

@@ -34,6 +34,7 @@ from datetime import datetime
 from io import BytesIO
 
 from fpdf import FPDF
+from fpdf.errors import FPDFException
 
 from app.core.config import settings
 
@@ -112,26 +113,74 @@ class ReviewReportGenerator:
     # 폰트 등록
     # ------------------------------------------------------------------
 
-    def _register_font(self, pdf: FPDF):
-        """한글 폰트를 등록합니다.
+    # OS 별 한글 폰트 자동 탐색 후보 — (regular, bold) 쌍.
+    # bold 가 None 이면 regular 를 양쪽으로 등록한다 (fpdf2 가 동일 파일로 bold 시뮬).
+    _FALLBACK_FONT_CANDIDATES: list[tuple[str, str | None]] = [
+        # Windows — Malgun Gothic
+        ("C:/Windows/Fonts/malgun.ttf", "C:/Windows/Fonts/malgunbd.ttf"),
+        ("C:/Windows/Fonts/gulim.ttc", None),
+        # macOS — Apple SD Gothic Neo
+        ("/System/Library/Fonts/AppleSDGothicNeo.ttc", None),
+        ("/Library/Fonts/AppleGothic.ttf", None),
+        # Linux — Nanum/Noto
+        ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+         "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"),
+        ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+         "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+    ]
 
-        학습 포인트:
-            fpdf2에서 한글을 표시하려면 TTF 폰트를 명시적으로 등록해야 합니다.
-            폰트 파일이 없으면 기본 Helvetica로 폴백합니다 (한글 깨짐 가능).
+    def _resolve_font_paths(self) -> tuple[str, str | None] | None:
+        """settings.FONT_PATH > OS 별 후보 순으로 한글 폰트 경로를 찾는다.
+
+        Returns:
+            (regular, bold|None) 튜플 또는 None (어떤 폰트도 못 찾음).
         """
-        font_path = settings.FONT_PATH
-        if os.path.exists(font_path):
-            pdf.add_font(self.FONT_NAME, "", font_path, uni=True)
-            pdf.add_font(self.FONT_NAME, "B", font_path, uni=True)
-            logger.debug(f"한글 폰트 등록: {font_path}")
-        else:
-            logger.warning(f"한글 폰트를 찾을 수 없음: {font_path}. 기본 폰트 사용")
+        configured = settings.FONT_PATH
+        if configured and os.path.exists(configured):
+            return (configured, None)
+
+        for regular, bold in self._FALLBACK_FONT_CANDIDATES:
+            if os.path.exists(regular):
+                bold_path = bold if (bold and os.path.exists(bold)) else None
+                return (regular, bold_path)
+
+        return None
+
+    def _register_font(self, pdf: FPDF):
+        """한글 폰트를 등록한다.
+
+        탐색 우선순위:
+            1. settings.FONT_PATH (사용자 명시)
+            2. OS 표준 한글 폰트 경로 (Windows Malgun, macOS Apple SD Gothic, Linux Nanum/Noto)
+            3. 모두 실패 시 경고만 — _set_font 가 Helvetica 로 폴백하지만
+               한글 텍스트는 FPDFUnicodeEncodingException 을 일으킨다.
+        """
+        resolved = self._resolve_font_paths()
+        if resolved is None:
+            logger.warning(
+                "한글 폰트를 찾을 수 없음 (settings.FONT_PATH 미지정 + OS 표준 경로 부재). "
+                "Helvetica 폴백 — 한글 텍스트는 깨질 수 있다."
+            )
+            return
+
+        regular_path, bold_path = resolved
+        pdf.add_font(self.FONT_NAME, "", regular_path, uni=True)
+        # bold 별도 파일이 있으면 그걸로, 없으면 regular 를 bold 자리에 등록 (fpdf2 시뮬레이트)
+        pdf.add_font(self.FONT_NAME, "B", bold_path or regular_path, uni=True)
+        logger.info(
+            "한글 폰트 등록: regular=%s bold=%s",
+            regular_path, bold_path or "(same as regular)",
+        )
 
     def _set_font(self, pdf: FPDF, style: str = "", size: int = 10):
-        """폰트를 설정합니다 (한글 폰트 우선, 없으면 Helvetica)."""
+        """폰트를 설정합니다 (한글 폰트 우선, 없으면 Helvetica).
+
+        한글 폰트가 등록되지 않았거나 (style 변형이 없는) 경우 fpdf2 가
+        FPDFException 을 던진다. 양쪽을 모두 잡아 Helvetica 로 폴백한다.
+        """
         try:
             pdf.set_font(self.FONT_NAME, style, size)
-        except RuntimeError:
+        except (RuntimeError, FPDFException):
             pdf.set_font("Helvetica", style, size)
 
     # ------------------------------------------------------------------

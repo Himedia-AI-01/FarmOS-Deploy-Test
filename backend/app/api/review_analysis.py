@@ -17,7 +17,6 @@
 import asyncio
 import json
 import logging
-import random
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -28,10 +27,24 @@ from sse_starlette.sse import EventSourceResponse
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.user import User
-from app.core.review_rag import ReviewRAG
-from app.core.review_analyzer import ReviewAnalyzer
-from app.core.trend_detector import TrendDetector
-from app.core.review_report import ReviewReportGenerator
+
+# 코어 서비스는 싱글턴 모듈에서 공유 (mcp/* 도 동일 인스턴스 사용 — Design §13 Q3)
+from app.core.review_singletons import (
+    rag as _rag,
+    analyzer as _analyzer,
+    trend_detector as _trend_detector,
+    report_generator as _report_generator,
+)
+# settings_state 는 update_settings 가 재할당하므로 alias 대신
+# 매번 모듈 속성으로 접근해야 stale 참조 문제가 없음.
+from app.core import review_singletons as _singletons
+
+# 멀티테넌트/샘플링 헬퍼는 공유 모듈에서 import (review_helpers.py)
+from app.core.review_helpers import (
+    get_seller_product_ids as _get_seller_product_ids,
+    stratified_sample as _stratified_sample,
+)
+
 from app.models.review_analysis import ReviewAnalysis
 from app.schemas.review_analysis import (
     AnalyzeRequest,
@@ -55,80 +68,6 @@ from app.schemas.review_analysis import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reviews", tags=["review-analysis"])
-
-# 서비스 인스턴스 (싱글턴)
-_rag = ReviewRAG()
-_analyzer = ReviewAnalyzer()
-_trend_detector = TrendDetector()
-_report_generator = ReviewReportGenerator()
-
-# 인메모리 설정 (추후 DB로 이동 가능)
-_settings = AnalysisSettings()
-
-
-async def _get_seller_product_ids(db: AsyncSession, seller_id: str | None = None) -> list[int] | None:
-    """판매자의 상품 ID 목록 조회 (멀티테넌트).
-
-    현재 shop_stores에 owner_id 컬럼이 없으므로 항상 None(전체 접근)을 반환합니다.
-    향후 owner_id가 추가되면 아래 주석 해제하여 필터링을 활성화합니다.
-
-    Args:
-        db: AsyncSession
-        seller_id: 판매자 ID (None이면 전체 접근)
-
-    Returns:
-        상품 ID 리스트 (None이면 전체 접근)
-    """
-    if seller_id is None:
-        return None
-
-    # TODO: shop_stores에 owner_id 추가 후 아래 코드 활성화
-    # from sqlalchemy import text as sa_text
-    # result = await db.execute(
-    #     sa_text("""
-    #         SELECT p.id FROM shop_products p
-    #         JOIN shop_stores s ON p.store_id = s.id
-    #         WHERE s.owner_id = :seller_id
-    #     """),
-    #     {"seller_id": seller_id},
-    # )
-    # product_ids = [row[0] for row in result.fetchall()]
-    # return product_ids if product_ids else None
-
-    return None  # 현재는 전체 접근
-
-
-def _stratified_sample(reviews: list[dict], sample_size: int) -> list[dict]:
-    """rating별 비례 층화 샘플링으로 대표성 있는 부분집합을 추출합니다.
-
-    전체 10,000건 중 rating 분포를 유지하면서 sample_size건만 추출합니다.
-    예: 전체에서 5점이 60%, 1점이 5%면 샘플에서도 동일 비율.
-    """
-    if len(reviews) <= sample_size:
-        return reviews
-
-    # rating별 그룹핑
-    by_rating: dict[int, list[dict]] = {}
-    for r in reviews:
-        key = int(r.get("metadata", {}).get("rating", r.get("rating", 0)))
-        by_rating.setdefault(key, []).append(r)
-
-    sampled: list[dict] = []
-    total = len(reviews)
-    for rating, group in by_rating.items():
-        # 비례 배분 (최소 1건)
-        n = max(1, round(len(group) / total * sample_size))
-        sampled.extend(random.sample(group, min(n, len(group))))
-
-    # 목표 수에 맞추기 (반올림 오차 보정)
-    if len(sampled) > sample_size:
-        sampled = random.sample(sampled, sample_size)
-    elif len(sampled) < sample_size:
-        remaining = [r for r in reviews if r not in sampled]
-        extra = min(sample_size - len(sampled), len(remaining))
-        sampled.extend(random.sample(remaining, extra))
-
-    return sampled
 
 
 # ---------------------------------------------------------------------------
@@ -308,10 +247,12 @@ async def analyze_reviews(req: AnalyzeRequest, db: AsyncSession = Depends(get_db
         target_scope=req.scope,
         review_count=total_count,
         sentiment_summary=result.get("sentiment_summary"),
-        keywords=[kw if isinstance(kw, dict) else kw for kw in result.get("keywords", [])],
+        # dict 가드 — 읽는 쪽이 isinstance(dict) 필터를 사용하므로 저장 시점부터 동일 정규화 적용.
+        # mcp/tools.py 의 _run_analysis_and_save 와 동일 패턴 (코드 단일 소스 원칙).
+        keywords=[kw for kw in result.get("keywords", []) if isinstance(kw, dict)],
         summary=json.dumps(summary_data, ensure_ascii=False) if summary_data else None,
-        trends=[t if isinstance(t, dict) else t for t in trends],
-        anomalies=[a if isinstance(a, dict) else a for a in anomalies],
+        trends=[t for t in trends if isinstance(t, dict)],
+        anomalies=[a for a in anomalies if isinstance(a, dict)],
         llm_provider=result.get("llm_provider", ""),
         llm_model=result.get("llm_model", ""),
         processing_time_ms=result.get("processing_time_ms", 0),
@@ -492,17 +433,18 @@ async def download_report(
 @router.get("/settings", response_model=AnalysisSettings)
 async def get_settings(_user: User = Depends(get_current_user)):
     """자동 분석 설정을 조회합니다."""
-    return _settings
+    return _singletons.settings_state
 
 
 @router.put("/settings", response_model=AnalysisSettings)
 async def update_settings(req: AnalysisSettingsUpdate, _user: User = Depends(get_current_user)):
-    """자동 분석 설정을 변경합니다."""
-    global _settings
+    """자동 분석 설정을 변경합니다.
 
+    싱글턴 모듈 속성을 통해 재할당해야 MCP tool 등 다른 import 측에도 반영된다.
+    """
     update_data = req.model_dump(exclude_none=True)
-    current = _settings.model_dump()
+    current = _singletons.settings_state.model_dump()
     current.update(update_data)
-    _settings = AnalysisSettings(**current)
+    _singletons.settings_state = AnalysisSettings(**current)
 
-    return _settings
+    return _singletons.settings_state
