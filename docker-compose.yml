@@ -21,7 +21,9 @@
 
 services:
   postgres:
-    # 로컬 시드 환경 (PG18.3) 과 메이저 버전 일치 — pg_restore cross-version 위험 제거
+    # PG16 — 로컬 시드(PG18.3)와 메이저 다름.
+    # 시드 복원은 plain SQL 경로(application-start.sh) 가 호환 토큰을 sanitize 후 psql -f 로 적재.
+    # custom-format dump (헤더 1.16) 는 PG16 pg_restore 가 못 읽으니 사용 금지.
     image: postgres:16-alpine
     container_name: farmos-postgres
     restart: unless-stopped

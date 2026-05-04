@@ -97,21 +97,62 @@ else
   DUMP_SIZE=$(du -h "$TMP_DUMP" | cut -f1)
   LOG "Downloaded dump (~$DUMP_SIZE) — restoring to postgres container"
 
-  docker cp "$TMP_DUMP" farmos-postgres:/tmp/seed.dump
-  rm -f "$TMP_DUMP"
+  # ────────────────────────────────────────────────
+  # 포맷 분기 — URL 확장자로 결정
+  #   .sql  → plain text  (psql -f) ; PG 메이저 버전 무관
+  #   .dump → custom      (pg_restore) ; 같은 메이저 버전 권장
+  #
+  # 배경: 로컬 시드 환경(PG18.3)이 만든 custom 덤프(헤더 1.16)는
+  #       PG16 pg_restore 가 못 읽음 → plain SQL 경로 권장.
+  # ────────────────────────────────────────────────
+  case "$SEED_DUMP_S3_URL" in
+    *.sql) DUMP_FORMAT=plain ;;
+    *)     DUMP_FORMAT=custom ;;
+  esac
+  LOG "Dump format: $DUMP_FORMAT"
 
-  # --clean --if-exists: 기존 테이블 drop 후 재생성 (빈 DB 가정이지만 안전)
-  # --no-owner --no-privileges: 로컬 dump 의 user/role (postgres) 정보 무시 → EC2 의 farmos 사용자가 owner
-  if docker exec farmos-postgres pg_restore \
-       -U "$PG_USER" -d "$PG_DB" \
-       --clean --if-exists --no-owner --no-privileges \
-       /tmp/seed.dump 2>&1 | tail -20; then
-    LOG "✓ Seed restore complete"
+  if [ "$DUMP_FORMAT" = "plain" ]; then
+    # PG17+ pg_dump 가 만든 plain SQL 을 PG16 으로 적용할 때 비호환 토큰 제거.
+    # 에러로 실패하지 않도록 사전 sanitize 가 필수 (ON_ERROR_STOP=0 만으론 \restrict syntax error 못 피함).
+    LOG "Sanitizing plain SQL dump for PG16 compatibility"
+    sed -i \
+        -e '/^\\restrict /d' \
+        -e '/^\\unrestrict /d' \
+        -e '/^SET transaction_timeout/d' \
+        -e "s/OWNER TO postgres/OWNER TO ${PG_USER}/g" \
+        "$TMP_DUMP"
+
+    docker cp "$TMP_DUMP" farmos-postgres:/tmp/seed.sql
+    rm -f "$TMP_DUMP"
+
+    # ON_ERROR_STOP=0: 잔여 권한 경고는 무시하고 데이터 적재 우선
+    if docker exec farmos-postgres psql \
+         -U "$PG_USER" -d "$PG_DB" \
+         -v ON_ERROR_STOP=0 \
+         -f /tmp/seed.sql 2>&1 | tail -30; then
+      LOG "✓ Seed restore complete (plain SQL)"
+    else
+      LOG "⚠ psql returned non-zero — check logs above"
+    fi
+
+    docker exec farmos-postgres rm -f /tmp/seed.sql
   else
-    LOG "⚠ pg_restore returned non-zero — check logs above"
-  fi
+    docker cp "$TMP_DUMP" farmos-postgres:/tmp/seed.dump
+    rm -f "$TMP_DUMP"
 
-  docker exec farmos-postgres rm -f /tmp/seed.dump
+    # --clean --if-exists: 기존 테이블 drop 후 재생성 (빈 DB 가정이지만 안전)
+    # --no-owner --no-privileges: 로컬 dump 의 user/role (postgres) 정보 무시 → EC2 의 farmos 사용자가 owner
+    if docker exec farmos-postgres pg_restore \
+         -U "$PG_USER" -d "$PG_DB" \
+         --clean --if-exists --no-owner --no-privileges \
+         /tmp/seed.dump 2>&1 | tail -20; then
+      LOG "✓ Seed restore complete (custom)"
+    else
+      LOG "⚠ pg_restore returned non-zero — check logs above"
+    fi
+
+    docker exec farmos-postgres rm -f /tmp/seed.dump
+  fi
 
   # 재확인
   PESTICIDE_ROWS=$(count_table "rag_pesticide_products")
