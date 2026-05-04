@@ -113,7 +113,12 @@ jq -r '
       else
         n | sub("/farmos/prod/"; "") | gsub("/"; "_") | ascii_upcase
       end;
-    .Parameters[] | "\(name_map(.Name))=\(.Value)"
+    .Parameters[]
+    # shop/* 키는 .env.shop 으로 따로 생성됨 — main .env 에서 제외 (이중 노출 방지)
+    | select(.Name | startswith("/farmos/prod/shop/") | not)
+    # @sh: 값에 따옴표/스페이스/쉘 메타문자가 있어도 안전하게 single-quote wrap
+    # bash source 와 docker compose env_file 둘 다 single-quote stripping 지원
+    | "\(name_map(.Name))=\(.Value | @sh)"
   ' < "$TMP_JSON" > "$ENV_FILE"
 
 # ────────────────────────────────────────────────
@@ -174,7 +179,9 @@ jq -r '
       else
         n | sub("/farmos/prod/shop/"; "") | gsub("/"; "_") | ascii_upcase
       end;
-    .Parameters[] | "\(shop_name_map(.Name))=\(.Value)"
+    # @sh: ALLOW_ORIGINS 같은 JSON 배열 값에 포함된 따옴표가 그대로 .env.shop 으로 들어가지 않도록
+    # single-quote 으로 감싸 shell/docker 양쪽에서 안전하게 파싱되게 함
+    .Parameters[] | "\(shop_name_map(.Name))=\(.Value | @sh)"
   ' < "$TMP_SHOP_JSON" > "$SHOP_ENV_FILE"
 
 # 빈 파일이면 placeholder 한 줄 추가 (compose env_file: 빈 파일 거부 방지)
