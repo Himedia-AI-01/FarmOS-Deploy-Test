@@ -117,7 +117,10 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 60s                            # bge-m3 모델 로드 대기
+      # 첫 부팅: HuggingFace에서 BAAI/bge-m3 (~2.2GB) + reranker (~570MB) 다운로드
+      # → t3.medium 기준 3~5분 소요. start_period 안에 healthy 도달 못 하면 retries 카운트 시작.
+      # 두 번째 부팅부터는 ./data/hf-cache-shop 볼륨에서 로드 → 30초 내 healthy.
+      start_period: 600s
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }

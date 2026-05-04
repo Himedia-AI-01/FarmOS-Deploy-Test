@@ -32,7 +32,7 @@ hooks:
 
   ApplicationStart:
     - location: scripts/application-start.sh
-      timeout: 600
+      timeout: 900
       runas: ubuntu
 
   ValidateService:
