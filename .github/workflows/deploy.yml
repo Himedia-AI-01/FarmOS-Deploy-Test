@@ -98,8 +98,12 @@ jobs:
         run: |
           OWNER_LC=$(echo "${{ secrets.GHCR_OWNER }}" | tr '[:upper:]' '[:lower:]')
           REPO="${OWNER_LC}/shopping-mall-api"
+          # 12자 abbreviated SHA — farmos build-and-push 와 동일 패턴 (docker-compose 의 IMAGE_TAG 와 매칭)
+          TAG="sha-${GITHUB_SHA::12}"
           echo "image_repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$TAG"   >> "$GITHUB_OUTPUT"
           echo "Repo: ${{ env.REGISTRY }}/${REPO}"
+          echo "Tag:  ${TAG}"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -117,7 +121,7 @@ jobs:
           file: shopping_mall/backend/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:sha-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:${{ steps.meta.outputs.image_tag }}
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:latest
           # Registry cache (GHCR 자체를 캐시 저장소로 사용) — GHA cache 의 10GB 한계/export 오버헤드 회피
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:buildcache
