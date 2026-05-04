@@ -31,7 +31,11 @@ services:
       POSTGRES_DB:       ${POSTGRES_DB:-farmos}
       TZ: Asia/Seoul
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data   # 호스트 바인드 마운트 — SC-3 데이터 보존
+      # PG18+ 새 마운트 규칙 — /var/lib/postgresql 루트로 마운트
+      # 내부에 18/docker/ 서브디렉토리가 자동 생성되어 그 안에 실제 PGDATA 위치.
+      # PR 1259 (postgres docker-library) 참고.
+      # PG16 이전과 호환 안 됨 — 기존 /data 디렉토리는 비워야 init 가능.
+      - ./data/postgres:/var/lib/postgresql        # SC-3 데이터 보존 (호스트 바인드 마운트)
     networks:
       - farmos
     healthcheck:
