@@ -218,3 +218,16 @@ app.include_router(faq.router)
 @app.get("/")
 def root():
     return {"message": "Shopping Mall API is running", "docs": "/docs"}
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    """Liveness probe.
+
+    uvicorn 은 lifespan startup 완료 후에만 HTTP 요청을 처리하므로,
+    이 엔드포인트가 200을 반환한다는 것은 reranker/bge-m3/AsyncPostgresSaver
+    초기화가 모두 끝났음을 의미한다.
+
+    docker-compose healthcheck 와 nginx 의 /health 패스스루에서 호출.
+    """
+    return {"status": "ok"}
