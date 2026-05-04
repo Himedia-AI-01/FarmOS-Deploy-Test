@@ -12,6 +12,12 @@ sudo mkdir -p /opt/farmos/data/postgres /opt/farmos/data/chroma /opt/farmos/data
               /opt/farmos/dist /opt/farmos/shop-dist /opt/farmos/release
 sudo chown -R ubuntu:ubuntu /opt/farmos
 
+# Postgres:18-alpine 은 uid 70 (postgres user) 으로 실행되므로
+# /var/lib/postgresql 마운트 루트가 uid 70 소유여야 mkdir/init 가능.
+# 위 recursive chown 으로 ubuntu:ubuntu 가 됐으니 명시적으로 되돌림.
+sudo chown -R 70:70 /opt/farmos/data/postgres
+LOG "  /opt/farmos/data/postgres chowned to 70:70 (postgres alpine uid)"
+
 # 직전에 실행 중이던 farmos-api 이미지 태그를 .prev-tag 에 백업
 PREV_IMAGE=$(docker inspect farmos-api --format '{{.Config.Image}}' 2>/dev/null || echo "")
 if [ -n "$PREV_IMAGE" ]; then
