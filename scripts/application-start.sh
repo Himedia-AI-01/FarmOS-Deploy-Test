@@ -41,16 +41,30 @@ docker compose up -d postgres
 # ────────────────────────────────────────────────
 LOG "Checking DB seed status..."
 
-# postgres 컨테이너 healthy 대기 (최대 60초)
-for i in $(seq 1 12); do
-  if docker inspect -f '{{.State.Health.Status}}' farmos-postgres 2>/dev/null | grep -q healthy; then
-    break
-  fi
-  sleep 5
-done
-
 PG_USER="${POSTGRES_USER:-farmos}"
 PG_DB="${POSTGRES_DB:-farmos}"
+
+# postgres 가 실제 쿼리 가능할 때까지 대기 (최대 150초)
+# 단순 healthcheck (pg_isready) 만으로는 alpine 이미지의 init/restart 사이클을 못 잡음.
+# 실제 SELECT 1 이 통과되는 시점까지 대기 → docker cp / pg_restore 안전.
+LOG "Waiting for postgres to be query-ready..."
+PG_READY=0
+for i in $(seq 1 30); do
+  if docker exec farmos-postgres psql -U "$PG_USER" -d "$PG_DB" -tAc "SELECT 1" 2>/dev/null | tr -d '[:space:]' | grep -q "^1$"; then
+    LOG "Postgres ready at attempt $i (waited ~$((i*3))s)"
+    PG_READY=1
+    # 안전 마진 — init 직후 immediate query 후 postgres 가 마지막 restart 하는 케이스 방지
+    sleep 5
+    break
+  fi
+  sleep 3
+done
+
+if [ "$PG_READY" -eq 0 ]; then
+  LOG "ERROR: postgres did not become query-ready within 90s"
+  docker logs farmos-postgres --tail 30 2>&1 | head -50
+  exit 1
+fi
 
 count_table() {
   docker exec farmos-postgres psql -U "$PG_USER" -d "$PG_DB" -tAc \
