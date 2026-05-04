@@ -27,6 +27,11 @@ cp -f /opt/farmos/release/nginx.conf         /opt/farmos/nginx.conf 2>/dev/null 
 if [ -d /opt/farmos/release/dist ]; then
   rsync -a --delete /opt/farmos/release/dist/ /opt/farmos/dist/
 fi
+# shopping_mall frontend dist (신규)
+if [ -d /opt/farmos/release/shop-dist ]; then
+  mkdir -p /opt/farmos/shop-dist
+  rsync -a --delete /opt/farmos/release/shop-dist/ /opt/farmos/shop-dist/
+fi
 
 # ────────────────────────────────────────────────
 # 2) EC2 region 자동 감지 (IMDSv2)
@@ -56,6 +61,14 @@ aws ssm get-parameters-by-path \
   --region "$REGION" \
   --output json \
   > "$TMP_JSON"
+
+# /farmos/prod/shop/* 키만 따로 추출 — shop-api 컨테이너 전용 .env.shop 생성용
+TMP_SHOP_JSON=$(mktemp)
+trap 'rm -f "$TMP_JSON" "$TMP_SHOP_JSON"' EXIT
+jq '{Parameters: [.Parameters[] | select(.Name | startswith("/farmos/prod/shop/"))]}' \
+  < "$TMP_JSON" > "$TMP_SHOP_JSON"
+SHOP_PARAM_COUNT=$(jq '.Parameters | length' < "$TMP_SHOP_JSON")
+LOG "Shop-specific parameters: $SHOP_PARAM_COUNT"
 
 # R10 추가 안전장치: 빈 응답(권한 누락 또는 시드 미완료) 즉시 검출
 PARAM_COUNT=$(jq '.Parameters | length' < "$TMP_JSON")
@@ -96,6 +109,7 @@ jq -r '
       elif n == "/farmos/prod/external/kakao_rest_key"      then "KAKAO_REST_API_KEY"
       elif n == "/farmos/prod/image/tag"                    then "IMAGE_TAG"
       elif n == "/farmos/prod/ghcr/owner"                   then "GHCR_OWNER"
+      elif n == "/farmos/prod/seed/dump_url"                then "SEED_DUMP_S3_URL"
       else
         n | sub("/farmos/prod/"; "") | gsub("/"; "_") | ascii_upcase
       end;
@@ -130,6 +144,52 @@ FARM_NY=106
 ENV=production
 LOG_LEVEL=INFO
 DEFAULTS
+
+# ────────────────────────────────────────────────
+# 4b) shopping_mall 전용 .env.shop 생성 (신규)
+#     - /farmos/prod/shop/* 키만 추출
+#     - shop config.py 변수명 매핑 (lowercase → UPPER로, pydantic-settings 는 대소문자 무관)
+# ────────────────────────────────────────────────
+SHOP_ENV_FILE=/opt/farmos/.env.shop
+jq -r '
+    def shop_name_map(n):
+      if   n == "/farmos/prod/shop/anniversary_api_key"   then "ANNIVERSARY_API_KEY"
+      elif n == "/farmos/prod/shop/anthropic_api_key"     then "ANTHROPIC_API_KEY"
+      elif n == "/farmos/prod/shop/claude_fallback_model" then "CLAUDE_FALLBACK_MODEL"
+      elif n == "/farmos/prod/shop/embed_provider"        then "EMBED_PROVIDER"
+      elif n == "/farmos/prod/shop/embed_model"           then "EMBED_MODEL"
+      elif n == "/farmos/prod/shop/embed_api_key"         then "EMBED_API_KEY"
+      elif n == "/farmos/prod/shop/embed_base_url"        then "EMBED_BASE_URL"
+      elif n == "/farmos/prod/shop/reranker_model"        then "RERANKER_MODEL"
+      elif n == "/farmos/prod/shop/rag_distance_threshold"        then "RAG_DISTANCE_THRESHOLD"
+      elif n == "/farmos/prod/shop/rag_storage_distance_threshold" then "RAG_STORAGE_DISTANCE_THRESHOLD"
+      elif n == "/farmos/prod/shop/rag_storage_retry_threshold"    then "RAG_STORAGE_RETRY_THRESHOLD"
+      elif n == "/farmos/prod/shop/agent_max_iterations"  then "AGENT_MAX_ITERATIONS"
+      elif n == "/farmos/prod/shop/use_multi_agent"       then "USE_MULTI_AGENT"
+      elif n == "/farmos/prod/shop/langchain_tracing_v2"  then "LANGCHAIN_TRACING_V2"
+      elif n == "/farmos/prod/shop/langchain_api_key"     then "LANGCHAIN_API_KEY"
+      elif n == "/farmos/prod/shop/langchain_project"     then "LANGCHAIN_PROJECT"
+      elif n == "/farmos/prod/shop/allow_origins"         then "ALLOW_ORIGINS"
+      elif n == "/farmos/prod/shop/farmos_api_url"        then "FARMOS_API_URL"
+      else
+        n | sub("/farmos/prod/shop/"; "") | gsub("/"; "_") | ascii_upcase
+      end;
+    .Parameters[] | "\(shop_name_map(.Name))=\(.Value)"
+  ' < "$TMP_SHOP_JSON" > "$SHOP_ENV_FILE"
+
+# 빈 파일이면 placeholder 한 줄 추가 (compose env_file: 빈 파일 거부 방지)
+if [ ! -s "$SHOP_ENV_FILE" ]; then
+  echo "# shop SSM keys not yet seeded — using farmos shared .env only" > "$SHOP_ENV_FILE"
+fi
+
+# shop default 추가 (config.py default 와 일치, 운영 가시성)
+cat >> "$SHOP_ENV_FILE" <<'SHOP_DEFAULTS'
+POLICY_DOCS_DIR=/app/ai/docs
+SHOP_DEFAULTS
+
+chmod 600 "$SHOP_ENV_FILE"
+chown ubuntu:ubuntu "$SHOP_ENV_FILE"
+LOG "Generated $SHOP_ENV_FILE with $SHOP_PARAM_COUNT shop-specific keys"
 
 # ────────────────────────────────────────────────
 # 5) 권한 잠금

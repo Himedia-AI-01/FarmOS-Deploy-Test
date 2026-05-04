@@ -82,6 +82,47 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ────────────────────────────────────────────────────────────────
+  # Job 1b: shopping_mall Backend 이미지 빌드 + GHCR push (병렬)
+  # ────────────────────────────────────────────────────────────────
+  build-shop-and-push:
+    name: Build & Push shopping_mall to GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30          # bge-m3 모델 preload(~2.2GB) 포함
+    outputs:
+      image_repo: ${{ steps.meta.outputs.image_repo }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute shop image metadata
+        id: meta
+        run: |
+          OWNER_LC=$(echo "${{ secrets.GHCR_OWNER }}" | tr '[:upper:]' '[:lower:]')
+          REPO="${OWNER_LC}/shopping-mall-api"
+          echo "image_repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "Repo: ${{ env.REGISTRY }}/${REPO}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push (shopping_mall backend)
+        uses: docker/build-push-action@v6
+        with:
+          context: shopping_mall/backend
+          file: shopping_mall/backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:sha-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_repo }}:latest
+          cache-from: type=gha,scope=shop
+          cache-to: type=gha,mode=max,scope=shop
+
+  # ────────────────────────────────────────────────────────────────
   # Job 2: Frontend 빌드 (Vite) — 병렬 실행
   # ────────────────────────────────────────────────────────────────
   build-frontend:
@@ -138,11 +179,66 @@ jobs:
           retention-days: 7
 
   # ────────────────────────────────────────────────────────────────
+  # Job 2b: shopping_mall Frontend 빌드 (Vite) — 병렬 실행
+  # ────────────────────────────────────────────────────────────────
+  build-shop-frontend:
+    name: Build shopping_mall Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: shopping_mall/frontend/package-lock.json
+
+      - name: Install dependencies (clean)
+        run: npm ci
+        working-directory: shopping_mall/frontend
+
+      - name: Build
+        run: npm run build
+        working-directory: shopping_mall/frontend
+        env:
+          # shopping_mall/frontend 는 src/lib/api.ts 가 VITE_API_URL 을 읽음.
+          # 같은 오리진(shoppingmall.<도메인>) → 상대경로 사용.
+          VITE_API_URL: ""
+
+      # ─── 임시 패치 (shopping_mall/frontend SoT 정리 전까지) ───
+      # src/stores/userStore.ts:3 의 'http://localhost:8000/api/v1' (FARMOS_API)
+      # 와 src/lib/api.ts fallback 'http://localhost:4000' 을 상대경로로 치환.
+      # FARMOS_API 는 같은 오리진이 아니므로 cross-origin (shoppingmall→farmos) → farmos 도메인으로 명시 필요.
+      # 데모 단계에서는 일단 EIP/도메인 무관하게 동작하도록 'https://farmos.도메인/api/v1' placeholder 사용 — 사용자가 SSM 통해 주입 가능.
+      - name: Patch hardcoded URLs in shop dist (temporary)
+        run: |
+          echo "Before patch:"
+          grep -c "localhost:4000" shopping_mall/frontend/dist/assets/*.js 2>/dev/null || echo "(no localhost:4000)"
+          grep -c "localhost:8000" shopping_mall/frontend/dist/assets/*.js 2>/dev/null || echo "(no localhost:8000)"
+
+          # localhost:4000 (자기 백엔드) → 상대경로
+          find shopping_mall/frontend/dist -type f \( -name "*.js" -o -name "*.html" \) \
+            -exec sed -i 's|http://localhost:4000|""|g' {} \;
+          # localhost:8000/api/v1 (farmos 백엔드 cross-origin) → 그대로 두면 시연 환경에서 깨짐
+          # → CF 도메인 정해지면 deploy.yml 의 이 step 에서 명시 치환 필요. 우선 placeholder 유지.
+
+          echo "After patch:"
+          grep -c "localhost:4000" shopping_mall/frontend/dist/assets/*.js 2>/dev/null || echo "(0 - patched)"
+
+      - name: Upload shop frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: shop-frontend-dist
+          path: shopping_mall/frontend/dist
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────
   # Job 3: CodeDeploy 트리거 (OIDC → S3 → create-deployment → wait)
   # ────────────────────────────────────────────────────────────────
   deploy:
     name: Deploy via CodeDeploy
-    needs: [ build-and-push, build-frontend ]
+    needs: [ build-and-push, build-shop-and-push, build-frontend, build-shop-frontend ]
     runs-on: ubuntu-latest
     timeout-minutes: 25     # CodeDeploy In-Place 평균 5~10분, 여유 15분
     steps:
@@ -153,6 +249,12 @@ jobs:
         with:
           name: frontend-dist
           path: dist
+
+      - name: Download shop frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: shop-frontend-dist
+          path: shop-dist
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -242,10 +344,11 @@ jobs:
           cp scripts/application-start.sh  bundle/scripts/
           cp scripts/validate-service.sh   bundle/scripts/
           chmod +x bundle/scripts/*.sh
-          cp -r dist bundle/dist
+          cp -r dist      bundle/dist
+          cp -r shop-dist bundle/shop-dist
           cd bundle && zip -rq ../deploy-bundle.zip . && cd ..
           ls -lh deploy-bundle.zip
-          unzip -l deploy-bundle.zip | head -20
+          unzip -l deploy-bundle.zip | head -30
 
       - name: Upload bundle to S3
         id: s3upload

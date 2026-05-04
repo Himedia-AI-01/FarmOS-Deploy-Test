@@ -21,7 +21,8 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # 로컬 시드 환경 (PG18.3) 과 메이저 버전 일치 — pg_restore cross-version 위험 제거
+    image: postgres:18-alpine
     container_name: farmos-postgres
     restart: unless-stopped
     environment:
@@ -78,6 +79,41 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
+  # ────────────────────────────────────────────────────────────────
+  # shopping_mall API (FastAPI on port 4000)
+  # - DB: same Postgres container, same `farmos` DB (shop_ prefixed tables)
+  # - JWT: shared via .env (SSM /farmos/prod/jwt/secret_key)
+  # - ChromaDB: shared volume mount (separate collections — single-user demo)
+  # - env_file: .env (shared) + .env.shop (shop-specific) — last wins
+  # ────────────────────────────────────────────────────────────────
+  shop-api:
+    image: ghcr.io/${GHCR_OWNER}/shopping-mall-api:${IMAGE_TAG:-latest}
+    container_name: farmos-shop-api
+    restart: unless-stopped
+    env_file:
+      - ./.env                                     # shared: DB, JWT, LITELLM_*
+      - ./.env.shop                                # shop-specific: EMBED_*, RAG_*, LANGCHAIN_*
+    environment:
+      CHROMA_DB_PATH: /app/chroma_data
+      POLICY_DOCS_DIR: /app/ai/docs
+      TZ: Asia/Seoul
+    volumes:
+      - ./data/chroma:/app/chroma_data             # 공유 마운트 (RW with farmos-api — single-user demo)
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - farmos
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s                            # bge-m3 모델 로드 대기
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   nginx:
     image: nginx:1.27-alpine
     container_name: farmos-nginx
@@ -87,9 +123,12 @@ services:
       # 443 미사용 — CloudFlare Flexible SSL이 TLS 종료 (D6)
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro      # CodeDeploy가 release/nginx.conf → /opt/farmos/nginx.conf 로 복사
-      - ./dist:/usr/share/nginx/html:ro            # 프론트엔드 빌드 산출물 (M3 CI에서 빌드 → 번들에 포함)
+      - ./dist:/usr/share/nginx/html:ro            # farmos 프론트엔드 빌드 산출물
+      - ./shop-dist:/usr/share/nginx/html-shop:ro  # shopping_mall 프론트엔드 빌드 산출물
     depends_on:
       api:
+        condition: service_healthy
+      shop-api:
         condition: service_healthy
     networks:
       - farmos
