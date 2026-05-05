@@ -88,4 +88,4 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
 # tini = PID 1 (zombie reaper)
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers", "--forwarded-allow-ips", "*"]
