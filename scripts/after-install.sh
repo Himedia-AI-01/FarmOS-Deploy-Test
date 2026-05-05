@@ -158,7 +158,8 @@ DEFAULTS
 SHOP_ENV_FILE=/opt/farmos/.env.shop
 jq -r '
     def shop_name_map(n):
-      if   n == "/farmos/prod/shop/anniversary_api_key"   then "ANNIVERSARY_API_KEY"
+      if   n == "/farmos/prod/shop/database_url"          then "DATABASE_URL"
+      elif n == "/farmos/prod/shop/anniversary_api_key"   then "ANNIVERSARY_API_KEY"
       elif n == "/farmos/prod/shop/anthropic_api_key"     then "ANTHROPIC_API_KEY"
       elif n == "/farmos/prod/shop/claude_fallback_model" then "CLAUDE_FALLBACK_MODEL"
       elif n == "/farmos/prod/shop/embed_provider"        then "EMBED_PROVIDER"
@@ -231,5 +232,11 @@ if ! ( set -a; source "$ENV_FILE"; set +a ) >/dev/null 2>&1; then
   exit 1
 fi
 
-LOG ".env generated and validated"
+# .env.shop 도 동일하게 검증 (따옴표/이스케이프 문제 사전 검출)
+if ! ( set -a; source "$SHOP_ENV_FILE"; set +a ) >/dev/null 2>&1; then
+  ERROR ".env.shop syntax check failed — bash 'source' returned non-zero"
+  exit 1
+fi
+
+LOG ".env / .env.shop generated and validated"
 exit 0
