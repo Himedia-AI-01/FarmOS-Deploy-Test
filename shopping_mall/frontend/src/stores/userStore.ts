@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-const FARMOS_API = import.meta.env.VITE_FARMOS_LOGIN_URL ?? 'http://localhost:5173/login';
+const FARMOS_API = import.meta.env.VITE_FARMOS_API_URL ?? 'http://localhost:8000/api/v1';
 // 빈 문자열이면 같은 오리진(상대경로). 미설정(undefined)이면 로컬 dev fallback.
 // `||` 는 빈 문자열도 falsy 취급해 prod에서 localhost로 새므로 `??` 사용.
 const SHOP_API = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:4000';
