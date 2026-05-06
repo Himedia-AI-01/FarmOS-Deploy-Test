@@ -58,3 +58,5 @@ start.cmd
 *.pem
 cookies*.txt
 .env.shop
+
+scripts/*.ps1
