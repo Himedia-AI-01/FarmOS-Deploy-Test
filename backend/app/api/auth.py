@@ -1,3 +1,4 @@
+import os
 import secrets
 import time
 from collections import defaultdict
@@ -22,6 +23,13 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 COOKIE_KEY = "farmos_token"
 REFRESH_COOKIE_KEY = "farmos_refresh_token"
+
+# Cross-subdomain JWT 공유 (shoppingmall.<root> ↔ farmos.<root>)를 위한 쿠키 속성.
+# 로컬 개발: COOKIE_DOMAIN 미설정 → host-only, COOKIE_SECURE=False, SAMESITE=lax
+# 프로덕션:  COOKIE_DOMAIN=.lilpa.moe, COOKIE_SECURE=true, SAMESITE=none
+COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN") or None
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()
 
 # 비밀번호 재설정용 일회용 토큰 저장소 (인메모리, 5분 만료)
 _reset_tokens: dict[str, dict] = {}  # {token: {"user_id": str, "expires": float}}
@@ -54,8 +62,9 @@ def _set_token_cookie(response: Response, token: str):
         key=COOKIE_KEY,
         value=token,
         httponly=True,
-        secure=False,       # 개발환경 HTTP → False, 프로덕션에서는 True
-        samesite="lax",
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        domain=COOKIE_DOMAIN,
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/",
     )
@@ -66,8 +75,9 @@ def _set_refresh_cookie(response: Response, token: str):
         key=REFRESH_COOKIE_KEY,
         value=token,
         httponly=True,
-        secure=False,       # 개발환경 HTTP → False, 프로덕션에서는 True
-        samesite="lax",
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        domain=COOKIE_DOMAIN,
         max_age=REFRESH_TOKEN_EXPIRE_DAYS * 86400,
         path="/",
     )
@@ -141,8 +151,8 @@ async def login(req: LoginRequest, request: Request, response: Response, db: Asy
 @router.post("/logout")
 async def logout(response: Response):
     """로그아웃 — 쿠키 삭제."""
-    response.delete_cookie(key=COOKIE_KEY, path="/")
-    response.delete_cookie(key=REFRESH_COOKIE_KEY, path="/")
+    response.delete_cookie(key=COOKIE_KEY, path="/", domain=COOKIE_DOMAIN)
+    response.delete_cookie(key=REFRESH_COOKIE_KEY, path="/", domain=COOKIE_DOMAIN)
     return {"message": "로그아웃되었습니다."}
 
 
@@ -154,7 +164,7 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
         raise HTTPException(401, "리프레시 토큰이 없습니다.")
     payload = decode_refresh_token(refresh)
     if payload is None:
-        response.delete_cookie(key=REFRESH_COOKIE_KEY, path="/")
+        response.delete_cookie(key=REFRESH_COOKIE_KEY, path="/", domain=COOKIE_DOMAIN)
         raise HTTPException(401, "리프레시 토큰이 만료되었거나 유효하지 않습니다.")
     user_id = payload.get("sub", "")
     user = await user_store.find_by_id(db, user_id)
