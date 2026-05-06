@@ -3,7 +3,7 @@ import SearchBar from './SearchBar';
 import { useCart } from '@/hooks/useCart';
 import { useUserStore } from '@/stores/userStore';
 
-const FARMOS_LOGIN_URL = 'http://localhost:5173/login';
+const FARMOS_LOGIN_URL = import.meta.env.VITE_FARMOS_LOGIN_URL ?? 'http://localhost:5173/login';
 
 export default function Header() {
   const { data: cart } = useCart();

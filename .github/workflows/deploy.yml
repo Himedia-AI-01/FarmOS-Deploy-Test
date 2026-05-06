@@ -210,6 +210,8 @@ jobs:
           # shopping_mall/frontend 는 src/lib/api.ts 가 VITE_API_URL 을 읽음.
           # 같은 오리진(shoppingmall.<도메인>) → 상대경로 사용.
           VITE_API_URL: ""
+          VITE_FARMOS_API_URL: "https://farmos.lilpa.moe/api/v1"
+          VITE_FARMOS_LOGIN_URL: "https://farmos.lilpa.moe/login"
 
       # ─── 임시 패치 (shopping_mall/frontend SoT 정리 전까지) ───
       # src/stores/userStore.ts:3 의 'http://localhost:8000/api/v1' (FARMOS_API)
