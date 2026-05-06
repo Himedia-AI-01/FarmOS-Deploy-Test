@@ -1,5 +1,6 @@
 import logging
 import time
+import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -8,6 +9,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
+
+# .webp MIME 타입 등록 (Windows 등 일부 환경에서 누락 방지)
+mimetypes.add_type('image/webp', '.webp')
+mimetypes.add_type('image/jpeg', '.jpg')
+mimetypes.add_type('image/jpeg', '.jpeg')
+mimetypes.add_type('image/png', '.png')
 
 from app.services.ai_agent_bridge import AiAgentBridge
 from app.mcp import build_review_mcp
